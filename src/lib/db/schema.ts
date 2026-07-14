@@ -50,6 +50,12 @@ export const sources = sqliteTable("sources", {
  *   - publishedAt es la fecha original de publicación según la fuente.
  *   - fetchedAt es la fecha en que nuestro sistema capturó el artículo.
  *   - content puede ser el texto completo o un resumen/extracto del feed.
+ *   - classificationStatus rastrea el pipeline de clasificación:
+ *     "pending" → aún no procesado por el clasificador
+ *     "classified" → vinculado al menos a un thread en article_threads
+ *     "ignored" → DeepSeek lo marcó como irrelevante (deportes, farándula, etc.)
+ *     Este campo es lo que permite que el bucle de clasificación termine:
+ *     solo se procesan artículos "pending", los demás se ignoran en el SELECT.
  */
 export const articles = sqliteTable("articles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -61,6 +67,11 @@ export const articles = sqliteTable("articles", {
   url: text("url").notNull().unique(),
   publishedAt: text("published_at").notNull(),
   fetchedAt: text("fetched_at").notNull(),
+  classificationStatus: text("classification_status", {
+    enum: ["pending", "classified", "ignored"],
+  })
+    .notNull()
+    .default("pending"),
 });
 
 /*
@@ -159,6 +170,7 @@ export const analyses = sqliteTable("analyses", {
   verdict: text("verdict").notNull(),
   analysisDate: text("analysis_date").notNull(),
   createdAt: text("created_at").notNull(),
+  read: integer("read", { mode: "boolean" }).notNull().default(false),
 });
 
 /*
