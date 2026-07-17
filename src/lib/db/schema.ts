@@ -54,8 +54,21 @@ export const sources = sqliteTable("sources", {
  *     "pending" → aún no procesado por el clasificador
  *     "classified" → vinculado al menos a un thread en article_threads
  *     "ignored" → DeepSeek lo marcó como irrelevante (deportes, farándula, etc.)
+ *     "deferred" → necesita un hilo NUEVO que aún no existe; el job diario lo
+ *       deja apartado para que el job semanal (createNewThreads=true) lo
+ *       procese cuando cree el hilo que necesita.
+ *
+ *     Flujo de estados (máquina de estados del pipeline):
+ *       ┌─────────┐
+ *       │ pending │──(encaja en hilo existente)──→ classified
+ *       │         │──(irrelevante)───────────────→ ignored
+ *       │         │──(necesita hilo nuevo,        → deferred
+ *       └─────────┘   solo en modo semanal)───────→ classified
+ *
  *     Este campo es lo que permite que el bucle de clasificación termine:
- *     solo se procesan artículos "pending", los demás se ignoran en el SELECT.
+ *     ningún artículo se queda "pending" tras ser procesado. En modo diario,
+ *     los que necesitan hilo nuevo pasan a "deferred"; en modo semanal,
+ *     se consumen tanto "pending" como "deferred".
  */
 export const articles = sqliteTable("articles", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -68,7 +81,7 @@ export const articles = sqliteTable("articles", {
   publishedAt: text("published_at").notNull(),
   fetchedAt: text("fetched_at").notNull(),
   classificationStatus: text("classification_status", {
-    enum: ["pending", "classified", "ignored"],
+    enum: ["pending", "classified", "ignored", "deferred"],
   })
     .notNull()
     .default("pending"),

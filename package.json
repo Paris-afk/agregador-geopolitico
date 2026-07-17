@@ -12,10 +12,13 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "db:seed": "npx tsx src/lib/db/seed.ts",
-    "db:fix-status": "npx tsx src/lib/db/fix-classification-status.ts"
+    "db:fix-status": "npx tsx src/lib/db/fix-classification-status.ts",
+    "job:daily": "tsx src/jobs/daily.ts",
+    "job:weekly": "tsx src/jobs/weekly.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
+    "dotenv": "^17.4.2",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.10",
     "openai": "^6.46.0",

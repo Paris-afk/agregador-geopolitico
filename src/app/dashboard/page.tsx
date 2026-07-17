@@ -589,7 +589,7 @@ function LeadArticle({
                   {p.label}
                 </p>
                 <p style={{
-                  margin: 0, fontSize: "16.5px", lineHeight: 1.62,
+                  margin: 0, fontSize: "18.5px", lineHeight: 1.62,
                   color: "oklch(0.78 0.014 84)",
                 }}>
                   {p.text}
@@ -792,7 +792,7 @@ function RestArticle({
                   {p.label}
                 </p>
                 <p style={{
-                  margin: 0, fontSize: "14.5px", lineHeight: 1.6,
+                  margin: 0, fontSize: "16.5px", lineHeight: 1.6,
                   color: "oklch(0.76 0.014 84)",
                 }}>
                   {p.text}

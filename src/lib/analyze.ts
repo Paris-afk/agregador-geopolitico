@@ -1,6 +1,6 @@
 import { db } from "./db/index";
 import { threads, articles, sources, articleThreads, analyses } from "./db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, sql } from "drizzle-orm";
 import { analyzeThread } from "./deepseek";
 import type { AnalysisOutput } from "./deepseek";
 import { getThreadPerspectiveCoverage } from "./threads";
@@ -42,13 +42,31 @@ import { getThreadPerspectiveCoverage } from "./threads";
 const ARTICLES_PER_THREAD = 40;
 const MAX_THREADS_PER_RUN = 50;
 
-export async function analyzeAllThreads(): Promise<{
+/*
+ * analyzeAllThreads — Analiza hilos activos con >=2 perspectivas.
+ *
+ * Parámetro onlyWithRecentArticles:
+ *   - false (default): analiza TODOS los hilos triangulables. Útil para
+ *     forzar un re-análisis manual completo desde la API.
+ *   - true: solo analiza hilos que tienen al menos UN artículo con fetchedAt
+ *     en las últimas 24 horas. Los hilos sin artículos recientes se saltan:
+ *     su state ya refleja todo lo conocido, y re-analizarlos produciría
+ *     prácticamente el mismo resultado gastando tokens de Pro+thinking.
+ *     El filtro de 24h usa fetchedAt (cuándo lo capturamos), no publishedAt
+ *     (cuándo se publicó), porque fetchedAt es lo que avanza con cada job
+ *     diario: un artículo capturado hoy es "nuevo para el sistema",
+ *     independientemente de su fecha de publicación original.
+ */
+export async function analyzeAllThreads(opts?: {
+  onlyWithRecentArticles?: boolean;
+}): Promise<{
   totalActive: number;
   analyzed: number;
   skipped: number;
   failed: number;
   totalTimeMs: number;
 }> {
+  const onlyWithRecentArticles = opts?.onlyWithRecentArticles ?? false;
   const started = Date.now();
 
   /*
@@ -84,7 +102,49 @@ export async function analyzeAllThreads(): Promise<{
     }
   }
 
-  const skipped = allActive.length - eligible.length;
+  const skippedByPerspectives = allActive.length - eligible.length;
+
+  /*
+   * Filtro opcional: solo hilos con artículos recientes (últimas 24h).
+   *
+   * Por qué este filtro es correcto:
+   *   Un hilo sin artículos nuevos en 24h no tiene novedades que integrar
+   *   en su state. Re-analizarlo produciría un análisis casi idéntico al
+   *   anterior: el mismo state de entrada, los mismos 40 artículos más
+   *   recientes (que no cambiaron), el mismo veredicto. Gastar una llamada
+   *   a Pro+thinking en eso es desperdiciar tokens sin ganar señal nueva.
+   *   Si un operador quiere forzar re-análisis completo, usa la API
+   *   (POST /api/analyze) que llama con onlyWithRecentArticles=false.
+   */
+  let skippedByNoRecentArticles = 0;
+
+  if (onlyWithRecentArticles) {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const filtered: typeof eligible = [];
+
+    for (const t of eligible) {
+      const hasRecent = (
+        db
+          .select({ count: sql<number>`COUNT(*)` })
+          .from(articleThreads)
+          .innerJoin(articles, eq(articleThreads.articleId, articles.id))
+          .where(
+            sql`${eq(articleThreads.threadId, t.id)} AND ${articles.fetchedAt} >= ${cutoff}`
+          )
+          .get()
+      )?.count ?? 0;
+
+      if (hasRecent > 0) {
+        filtered.push(t);
+      }
+    }
+
+    skippedByNoRecentArticles = eligible.length - filtered.length;
+    eligible.length = 0;
+    eligible.push(...filtered);
+  }
+
+  const totalSkipped = skippedByPerspectives + skippedByNoRecentArticles;
 
   /*
    * SALVAGUARDA DURA: si el filtro por algún bug devuelve demasiados hilos,
@@ -98,7 +158,8 @@ export async function analyzeAllThreads(): Promise<{
   }
 
   console.log(
-    `\n🔬 INICIANDO ANÁLISIS — ${eligible.length} hilos de ${allActive.length} activos (${skipped} saltados por <2 perspectivas)\n`
+    `\n🔬 INICIANDO ANÁLISIS — ${eligible.length} hilos a analizar de ${allActive.length} activos ` +
+    `(${skippedByPerspectives} sin cobertura, ${skippedByNoRecentArticles} sin artículos recientes)\n`
   );
 
   let analyzed = 0;
@@ -120,9 +181,55 @@ export async function analyzeAllThreads(): Promise<{
 
     try {
       /*
-       * Cargar los artículos más recientes de este hilo.
-       * JOIN: article_threads → articles → sources (para obtener bias).
+       * Cargar SOLO los artículos NUEVOS desde el último análisis.
+       *
+       * Optimización de tokens: los artículos históricos ya están resumidos
+       * en thread.state (la memoria acumulada). Enviarlos de nuevo a
+       * Pro+thinking sería redundante y costoso. Solo enviamos:
+       *   - Los artículos con fetchedAt posterior al último análisis.
+       *   - El state actual (que resume todo lo anterior).
+       *
+       * Reducción estimada: un hilo típico acumula ~40-200 artículos.
+       * En cada análisis diario, solo ~3-8 son nuevos (los del día).
+       * Esto reduce el input de 40 artículos (~15-25K tokens) a ~3-8
+       * artículos (~4-10K tokens) + state (~500-1000 tokens). Es una
+       * reducción de ~50-70% en tokens de entrada para análisis diarios.
+       *
+       * Caso especial — PRIMER ANÁLISIS (state es null):
+       *   Sin memoria previa, no tenemos resumen del contexto histórico.
+       *   Enviamos todos los artículos disponibles (hasta el límite ~40)
+       *   para que el analista pueda construir el state inicial desde cero.
+       *   Este caso solo ocurre UNA vez por hilo (cuando se crea), así que
+       *   el costo es aceptable.
+       *
+       * Caso sin análisis previo pero con state (raro, ej. state manual):
+       *   Usamos últimas 48h como ventana conservadora.
        */
+
+      /*
+       * Fecha del último análisis para este hilo (si existe).
+       */
+      const lastAnalysis = db
+        .select({ analysisDate: analyses.analysisDate })
+        .from(analyses)
+        .where(eq(analyses.threadId, thread.id))
+        .orderBy(desc(analyses.analysisDate))
+        .limit(1)
+        .get();
+
+      const isFirstAnalysis = !lastAnalysis;
+
+      /*
+       * Construir la query con filtro temporal si hay análisis previo.
+       * Si es primer análisis → carga todos los artículos del hilo (sin
+       * filtro de fecha, porque no hay state que resuma el contexto previo).
+       * Si ya fue analizado → solo artículos con fetchedAt > lastAnalysisDate
+       * (los nuevos desde entonces; el state ya resume los anteriores).
+       */
+      const articleFilter = isFirstAnalysis
+        ? sql`${eq(articleThreads.threadId, thread.id)}`
+        : sql`${eq(articleThreads.threadId, thread.id)} AND ${articles.fetchedAt} > ${lastAnalysis.analysisDate}`;
+
       const threadArticles = db
         .select({
           sourceName: sources.name,
@@ -133,16 +240,20 @@ export async function analyzeAllThreads(): Promise<{
         .from(articleThreads)
         .innerJoin(articles, eq(articleThreads.articleId, articles.id))
         .innerJoin(sources, eq(articles.sourceId, sources.id))
-        .where(eq(articleThreads.threadId, thread.id))
+        .where(articleFilter)
         .orderBy(desc(articles.publishedAt))
         .limit(ARTICLES_PER_THREAD)
         .all();
 
       if (threadArticles.length === 0) {
-        console.log(`${label} ⏭  Saltado — sin artículos vinculados.`);
-        skipped;
+        console.log(`${label} ⏭  Saltado — sin artículos nuevos desde el último análisis.`);
         continue;
       }
+
+      const stateLabel = !isFirstAnalysis ? "+ state" : "sin state previo";
+      console.log(
+        `${label} Enviando al analista: ${threadArticles.length} artículos nuevos ${stateLabel}`
+      );
 
       /*
        * Llamar al analista (Pro + thinking, MODEL_SMART).
@@ -200,7 +311,7 @@ export async function analyzeAllThreads(): Promise<{
   const summary = {
     totalActive: allActive.length,
     analyzed,
-    skipped,
+    skipped: totalSkipped,
     failed,
     totalTimeMs,
   };
