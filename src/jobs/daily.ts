@@ -86,7 +86,8 @@ async function main() {
   /*
    * FASE 1: INGESTA
    */
-  console.log("\n📥 FASE 1/3 — INGESTA RSS\n");
+  console.log("\n📥 FASE 1/4 — INGESTA RSS\n");
+  const ingestStart = new Date().toISOString();
   const t1 = Date.now();
 
   try {
@@ -101,9 +102,35 @@ async function main() {
   }
 
   /*
+   * FASE 1b: IMÁGENES (best-effort, no aborta el pipeline)
+   *
+   * NIVEL 1 (del feed) ya quedó guardado durante la ingesta.
+   * Aquí hacemos NIVEL 2: fetch de la página para og:image en los artículos
+   * que el feed no traía imagen. Solo procesamos los nuevos de esta corrida
+   * (fetchedAt >= ingestStart). Si falla, logueamos y continuamos.
+   */
+  console.log("\n🖼  FASE 1b — RECUPERACIÓN DE IMÁGENES (NIVEL 2)\n");
+  const t1b = Date.now();
+
+  try {
+    const { extractImagesForArticles } = await import("../lib/images");
+    const img = await extractImagesForArticles(ingestStart);
+    console.log(
+      `\n🖼  IMÁGENES — ${img.fromFeed} del feed, ${img.fromPage} por og:image, ${img.failed} sin imagen en ${((Date.now() - t1b) / 1000).toFixed(1)}s`
+    );
+    console.log(
+      `   Google News: ${img.googleResolved} URLs resueltas, ${img.googleUnresolved} sin resolver`
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`\n❌ IMÁGENES FALLÓ (no crítico): ${msg}`);
+    console.error("Continuando con la clasificación...");
+  }
+
+  /*
    * FASE 2: CLASIFICACIÓN (modo diario: solo hilos existentes)
    */
-  console.log("\n📰 FASE 2/3 — CLASIFICACIÓN (modo diario: sin crear hilos nuevos)\n");
+  console.log("\n📰 FASE 2/4 — CLASIFICACIÓN (modo diario: sin crear hilos nuevos)\n");
   const t2 = Date.now();
 
   try {
@@ -118,7 +145,7 @@ async function main() {
   /*
    * FASE 3: ANÁLISIS
    */
-  console.log("\n🔬 FASE 3/3 — ANÁLISIS GEOPOLÍTICO\n");
+  console.log("\n🔬 FASE 3/4 — ANÁLISIS GEOPOLÍTICO\n");
   const t3 = Date.now();
 
   try {

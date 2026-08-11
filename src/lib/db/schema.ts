@@ -85,6 +85,9 @@ export const articles = sqliteTable("articles", {
   })
     .notNull()
     .default("pending"),
+  imageUrl: text("image_url"),
+  resolvedUrl: text("resolved_url"),
+  imageFetchedAt: text("image_fetched_at"),
 });
 
 /*

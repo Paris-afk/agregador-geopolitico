@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db/index";
 import { threads, analyses, articles, articleThreads } from "@/lib/db/schema";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, and, isNotNull } from "drizzle-orm";
 import { getThreadPerspectiveCoverage } from "@/lib/threads";
 
 /*
@@ -52,6 +52,7 @@ type DashboardRow = {
   latestAnalysis: typeof analyses.$inferSelect;
   perspectiveCoverage: ReturnType<typeof getThreadPerspectiveCoverage>;
   newArticlesToday: number;
+  heroImage: string | null;
 };
 
 export async function GET() {
@@ -101,6 +102,19 @@ export async function GET() {
       )
       .get()?.count ?? 0;
 
+    /*
+     * Imagen destacada del hilo: la del artículo más reciente que tenga
+     * imageUrl. Usada como miniatura en la tarjeta del dashboard.
+     */
+    const hero = db
+      .select({ imageUrl: articles.imageUrl })
+      .from(articleThreads)
+      .innerJoin(articles, eq(articleThreads.articleId, articles.id))
+      .where(and(eq(articleThreads.threadId, thread.id), isNotNull(articles.imageUrl)))
+      .orderBy(desc(articles.fetchedAt))
+      .limit(1)
+      .get();
+
     rows.push({
       thread: {
         id: thread.id,
@@ -111,6 +125,7 @@ export async function GET() {
       latestAnalysis: latest,
       perspectiveCoverage: coverage,
       newArticlesToday: todayCount,
+      heroImage: hero?.imageUrl ?? null,
     });
   }
 

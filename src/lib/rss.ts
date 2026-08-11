@@ -8,6 +8,11 @@ import { eq } from "drizzle-orm";
  *
  * FeedItemRaw es lo que devuelve rss-parser por cada <item> del feed.
  * IngestResult resume lo ocurrido con una fuente durante la ingesta.
+ *
+ * Campos de imagen (NIVEL 1, gratis):
+ *   - enclosure: rss-parser lo parsea nativo como { url, type, length }.
+ *   - mediaContent / mediaThumbnail: expuestos vía customFields (media:content
+ *     y media:thumbnail) con keepArray para capturar su atributo url.
  */
 type FeedItemRaw = {
   title?: string;
@@ -16,6 +21,12 @@ type FeedItemRaw = {
   link?: string;
   pubDate?: string;
   isoDate?: string;
+  guid?: string;
+  description?: string;
+  source?: { $?: { url?: string } };
+  enclosure?: { url?: string; type?: string; length?: string | number };
+  mediaContent?: Array<{ $?: { url?: string } } | { url?: string }>;
+  mediaThumbnail?: Array<{ $?: { url?: string } } | { url?: string }>;
 };
 
 export type IngestResult = {
@@ -26,7 +37,90 @@ export type IngestResult = {
   error?: string;
 };
 
-const parser = new Parser();
+/*
+ * Parser configurado con customFields:
+ *   - media:content / media:thumbnail: imágenes del feed (NIVEL 1).
+ *   - description / guid / source: Google News trae la URL real del
+ *     artículo en estos campos (el <link> apunta a news.google.com).
+ */
+const parser = new Parser({
+  customFields: {
+    item: [
+      ["media:content", "mediaContent", { keepArray: true }],
+      ["media:thumbnail", "mediaThumbnail", { keepArray: true }],
+      ["description", "description"],
+      ["guid", "guid"],
+      ["source", "source"],
+    ],
+  },
+});
+
+/*
+ * extractRealUrl — Obtiene la URL REAL del artículo cuando el feed pasa
+ * por Google News (el <link> es un redirect a news.google.com).
+ *
+ * Estrategias, en orden:
+ *   1. description: suele contener <a href="..."> con el enlace original.
+ *   2. guid: si es una URL http(s) directa (no google), es el artículo.
+ *   3. source.url: la URL base de la fuente (no el artículo, pero útil).
+ *   4. Fallback: el propio <link> si NO es de news.google.com (fuentes
+ *      directas ya traen la URL real en <link>).
+ */
+function extractRealUrl(item: FeedItemRaw): string | null {
+  // 1. description con <a href="...">
+  if (item.description) {
+    const m = item.description.match(/<a[^>]+href=["'](https?:\/\/[^"']+)["']/i);
+    if (m?.[1] && !m[1].includes("news.google.com")) return m[1];
+  }
+
+  // 2. guid directo
+  if (item.guid && /^https?:\/\//.test(item.guid) && !item.guid.includes("news.google.com")) {
+    return item.guid;
+  }
+
+  // 3. source.url
+  if (item.source?.$?.url && !item.source.$.url.includes("news.google.com")) {
+    return item.source.$.url;
+  }
+
+  // 4. link directo (fuentes que no pasan por Google News)
+  if (item.link && !item.link.includes("news.google.com")) {
+    return item.link;
+  }
+
+  return null;
+}
+
+/*
+ * extractFeedImage — Devuelve la URL de imagen que el feed ya trae (NIVEL 1).
+ *
+ * Orden de preferencia:
+ *   1. media:thumbnail (la más ligera, pensada para esto)
+ *   2. media:content (imagen destacada)
+ *   3. enclosure (si su type es image/*)
+ *
+ * Los valores de media:xxx vienen como { $: { url } } en keepArray mode,
+ * así que accedemos a item.$?.url.
+ */
+function extractFeedImage(item: FeedItemRaw): string | null {
+  const mediaThumb = item.mediaThumbnail?.[0];
+  if (mediaThumb) {
+    const url = "$" in mediaThumb ? (mediaThumb as { $?: { url?: string } }).$?.url : (mediaThumb as { url?: string }).url;
+    if (url) return url;
+  }
+
+  const mediaContent = item.mediaContent?.[0];
+  if (mediaContent) {
+    const url = "$" in mediaContent ? (mediaContent as { $?: { url?: string } }).$?.url : (mediaContent as { url?: string }).url;
+    if (url) return url;
+  }
+
+  if (item.enclosure?.url && item.enclosure.type?.startsWith("image/")) {
+    return item.enclosure.url;
+  }
+
+  return null;
+}
 
 /*
  * fetchFeed — Descarga y parsea un feed RSS de una sola fuente.
@@ -201,6 +295,19 @@ export async function ingestAllSources(): Promise<IngestResult[]> {
             url: item.link,
             publishedAt: item.isoDate ?? item.pubDate ?? now,
             fetchedAt: now,
+            /*
+             * NIVEL 1: el feed ya trae imagen → la guardamos directamente,
+             * sin peticiones extra. Si no hay, queda null y la fase de
+             * imágenes del pipeline hará NIVEL 2 (fetch de la página).
+             */
+            imageUrl: extractFeedImage(item),
+            /*
+             * URL real del artículo (ARREGLO 2a): Google News no redirige
+             * por HTTP, así que capturamos la URL real de description/guid/
+             * source en el momento de ingesta, gratis. Se usa después para
+             * extraer la og:image real y para el scraping futuro.
+             */
+            resolvedUrl: extractRealUrl(item),
           })
           /*
            * onConflictDoNothing: como articles.url tiene constraint UNIQUE,

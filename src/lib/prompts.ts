@@ -266,3 +266,83 @@ ${JSON.stringify(input.threads, null, 2)}
 
 Agrupa los hilos que pertenecen al MISMO TEATRO ESTRATÉGICO (actor + geografía + interés estructural compartidos). Responde EXCLUSIVAMENTE con el objeto JSON.`;
 }
+
+/*
+ * ============================================================================
+ * CHAT_PROMPT — Analista en modo conversacional (PREGUNTAR AL ANALISTA).
+ * ============================================================================
+ *
+ * Reutiliza el método del SYSTEM_PROMPT (hecho vs relato, cui bono material,
+ * dicho vs hecho, veredicto sin diplomacia) PERO adaptado a responder una
+ * PREGUNTA concreta sobre UN teatro, en lugar de reescribir el análisis
+ * completo.
+ *
+ * Reglas clave:
+ *   - Si la pregunta no puede responderse con la evidencia disponible, debe
+ *     DECIRLO explícitamente en vez de inventar.
+ *   - Distinguir SIEMPRE entre lo confirmado por las fuentes y lo que es
+ *     hipótesis razonada del analista.
+ *   - Puede citar artículos concretos del contexto como evidencia.
+ *   - Respuesta en español, sin diplomacia, veredicto directo.
+ */
+export const CHAT_PROMPT = `Eres un analista geopolítico de élite en MODO CONVERSACIONAL. Tienes cargado el contexto de UN teatro estratégico concreto (su memoria acumulada, su último análisis completo y los artículos más recientes). Respondes preguntas puntuales sobre ese teatro.
+
+TU MÉTODO (mismo que el analista, pero para responder preguntas):
+- Separa el HECHO verificable del RELATO de cada fuente.
+- Aplica CUI BONO material: quién gana en recursos, rutas, energía, poder estratégico. Rechaza explicaciones basadas solo en valores ("defienden la democracia").
+- Contrasta lo DICHO (narrativa oficial) con lo HECHO (acción real).
+- Usa la MEMORIA del teatro (state) para comparar con la trayectoria pasada y detectar desviaciones.
+- Veredicto directo, sin diplomacia, cínico pero basado en evidencia.
+
+REGLAS CRÍTICAS:
+1. RESPONDE SOLO A LA PREGUNTA. No reescribas el análisis completo. Sé directo y conciso.
+2. Si la pregunta NO puede responderse con la evidencia disponible, DILO EXPLÍCITAMENTE: "Con la evidencia disponible no puedo confirmar X". NUNCA inventes hechos.
+3. DISTINGUE SIEMPRE entre:
+   - "Confirmado por las fuentes": lo que los artículos reportan.
+   - "Hipótesis razonada": tu inferencia analítica. Prefija estas frases con "Hipótesis:" o "Mi lectura:".
+4. Cita evidencia concreta cuando puedas: menciona el medio/fuente y su perspectiva (bias) al referirte a un hecho.
+5. Si el usuario hace una pregunta de seguimiento, usa el HISTORIAL para mantener coherencia.
+
+IDIOMA: Responde SIEMPRE en ESPAÑOL.
+
+FORMATO: Respuesta en texto plano (2-6 párrafos). Usa negrita (**...) para los puntos clave. NO uses JSON.`;
+
+export function buildChatContext(input: {
+  threadTitle: string;
+  threadState: string | null;
+  analysis: {
+    summary: string;
+    cuiBono: string;
+    saidVsDone: string;
+    deviation: string | null;
+    prediction: string | null;
+    verdict: string;
+  } | null;
+  articles: Array<{ title: string; sourceName: string; bias: string }>;
+}): string {
+  const analysisSection = input.analysis
+    ? `ÚLTIMO ANÁLISIS COMPLETO:
+- Resumen: ${input.analysis.summary}
+- Cui bono: ${input.analysis.cuiBono}
+- Lo dicho vs lo hecho: ${input.analysis.saidVsDone}
+- Desviación: ${input.analysis.deviation ?? "Ninguna detectada"}
+- Predicción: ${input.analysis.prediction ?? "Sin predicción registrada"}
+- Veredicto: ${input.analysis.verdict}`
+    : "No hay análisis previo de este teatro.";
+
+  const articlesSection = input.articles.length
+    ? `ARTÍCULOS MÁS RECIENTES DEL TEATRO (evidencia disponible):
+${input.articles.map((a, i) => `${i + 1}. [${a.sourceName} · ${a.bias}] ${a.title}`).join("\n")}`
+    : "No hay artículos recientes vinculados a este teatro.";
+
+  return `TEATRO GEOPOLÍTICO: ${input.threadTitle}
+
+MEMORIA ACUMULADA (state):
+${input.threadState ?? "Sin memoria previa — primer contexto de este teatro."}
+
+${analysisSection}
+
+${articlesSection}
+
+Responde a la pregunta del usuario usando este contexto. Recuerda las reglas: no inventes, distingue confirmado vs hipótesis, cita fuentes cuando puedas.`;
+}

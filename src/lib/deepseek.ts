@@ -6,6 +6,8 @@ import {
   buildClassifierPrompt,
   CONSOLIDATOR_PROMPT,
   buildConsolidatorPrompt,
+  CHAT_PROMPT,
+  buildChatContext,
 } from "./prompts";
 
 /*
@@ -346,4 +348,81 @@ export async function findDuplicateThreads(
   }
 
   return { mergeGroups: obj.mergeGroups as MergeGroup[] };
+}
+
+/*
+ * ============================================================================
+ * CHAT CONTEXTUAL — "Preguntar al analista" sobre un teatro concreto.
+ * ============================================================================
+ *
+ * Modo conversacional: el analista responde preguntas puntuales sobre UN
+ * teatro, con todo su contexto cargado (state + último análisis + artículos).
+ *
+ * Modelo: usamos MODEL_FAST (flash) porque es una tarea conversacional de
+ * respuesta directa, no un análisis profundo de múltiples narrativas.
+ * El padre puede cambiarlo a MODEL_SMART si quiere razonamiento más profundo.
+ */
+
+export type AskThreadInput = {
+  threadTitle: string;
+  threadState: string | null;
+  analysis: {
+    summary: string;
+    cuiBono: string;
+    saidVsDone: string;
+    deviation: string | null;
+    prediction: string | null;
+    verdict: string;
+  } | null;
+  articles: Array<{ title: string; sourceName: string; bias: string }>;
+  question: string;
+  history: Array<{ role: "user" | "assistant"; content: string }>;
+};
+
+export type AskThreadOutput = {
+  answer: string;
+  tokensUsed: number;
+};
+
+/*
+ * askThread — Envía la pregunta al analista con el contexto del teatro
+ * y el historial de la conversación. Devuelve la respuesta y el coste
+ * aproximado (tokens) para loguear.
+ */
+export async function askThread(input: AskThreadInput): Promise<AskThreadOutput> {
+  const context = buildChatContext({
+    threadTitle: input.threadTitle,
+    threadState: input.threadState,
+    analysis: input.analysis,
+    articles: input.articles,
+  });
+
+  /*
+   * Historial: los mensajes previos se intercalan entre el contexto y la
+   * pregunta actual para permitir preguntas de seguimiento coherentes.
+   */
+  const historyMessages = input.history.slice(-6).map((m) => ({
+    role: m.role,
+    content: m.content,
+  }));
+
+  const completion = await client.chat.completions.create({
+    model: MODEL_FAST,
+    temperature: 0.3,
+    messages: [
+      { role: "system", content: CHAT_PROMPT },
+      { role: "user", content: context },
+      ...historyMessages,
+      { role: "user", content: `PREGUNTA: ${input.question}` },
+    ],
+  });
+
+  const answer = completion.choices[0]?.message?.content ?? "";
+  const tokensUsed = completion.usage?.total_tokens ?? 0;
+
+  if (!answer) {
+    throw new Error("DeepSeek (chat) devolvió una respuesta vacía.");
+  }
+
+  return { answer, tokensUsed };
 }

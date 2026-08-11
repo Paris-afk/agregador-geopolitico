@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "start": "next start -H 0.0.0.0 -p 3000",
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
     "lint": "eslint",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
@@ -14,7 +14,8 @@
     "db:seed": "npx tsx src/lib/db/seed.ts",
     "db:fix-status": "npx tsx src/lib/db/fix-classification-status.ts",
     "job:daily": "tsx src/jobs/daily.ts",
-    "job:weekly": "tsx src/jobs/weekly.ts"
+    "job:weekly": "tsx src/jobs/weekly.ts",
+    "script:clean-images": "tsx src/scripts/clean-images.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.11.1",
