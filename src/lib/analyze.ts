@@ -423,12 +423,18 @@ export async function analyzeAllThreads(opts?: {
         .run();
 
       /*
-       * Actualizar el state del hilo (la memoria acumulada) y updatedAt.
+       * Actualizar el state del hilo (la memoria acumulada), las entidades
+       * del teatro (countries/actors/domains como JSON) y el nivel de
+       * tensión. Todo se sobrescribe en cada análisis, igual que el state.
        */
       db.update(threads)
         .set({
           state: analysis.newState,
           updatedAt: now,
+          countries: JSON.stringify(analysis.countries ?? []),
+          actors: JSON.stringify(analysis.actors ?? []),
+          domains: JSON.stringify(analysis.domains ?? []),
+          tensionLevel: analysis.tensionLevel ?? null,
         })
         .where(eq(threads.id, thread.id))
         .run();

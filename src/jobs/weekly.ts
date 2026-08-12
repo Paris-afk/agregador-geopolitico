@@ -55,14 +55,14 @@ async function main() {
   const pipelineStarted = Date.now();
 
   console.log("═".repeat(60));
-  console.log("  PIPELINE SEMANAL — Clasificación completa + Consolidación");
+  console.log("  PIPELINE SEMANAL — Clasificación + Consolidación + Poda + Meta");
   console.log("  Inicio:", new Date().toISOString());
   console.log("═".repeat(60));
 
   /*
    * FASE 1: CLASIFICACIÓN COMPLETA (crea hilos nuevos)
    */
-  console.log("\n📰 FASE 1/2 — CLASIFICACIÓN COMPLETA (creando hilos nuevos)\n");
+  console.log("\n📰 FASE 1/4 — CLASIFICACIÓN COMPLETA (creando hilos nuevos)\n");
   const t1 = Date.now();
 
   try {
@@ -78,23 +78,69 @@ async function main() {
   /*
    * FASE 2: CONSOLIDACIÓN
    */
-  console.log("\n🔗 FASE 2/2 — CONSOLIDACIÓN DE HILOS DUPLICADOS\n");
+  console.log("\n🔗 FASE 2/4 — CONSOLIDACIÓN DE HILOS DUPLICADOS\n");
   const t2 = Date.now();
 
   try {
-    const result = await consolidateThreads();
+    const result = await consolidateThreads({ dryRun: false });
     if (result.groupsProcessed === 0) {
-      console.log("\n✅ CONSOLIDACIÓN — No se encontraron duplicados.");
+      console.log("\n✅ CONSOLIDACIÓN — No se encontraron grupos a fusionar.");
     } else {
       console.log(`\n✅ CONSOLIDACIÓN COMPLETADA — ${result.groupsProcessed} grupos fusionados en ${((Date.now() - t2) / 1000).toFixed(1)}s`);
       for (const d of result.details) {
-        console.log(`   "${d.canonicalTitle}" absorbió ${d.merged.length} hilos (ids: ${d.merged.join(", ")})`);
+        console.log(`   "${d.newTitle}" absorbió ${d.merged.length} hilos (ids: ${d.merged.join(", ")})`);
       }
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`\n❌ CONSOLIDACIÓN FALLÓ: ${msg}`);
     console.error("Los duplicados pueden fusionarse la próxima semana.");
+  }
+
+  /*
+   * FASE 3: PODA DEL MAPA (modo aplicar)
+   */
+  console.log("\n✂️  FASE 3/4 — PODA DE TEATROS SIN SUSTANCIA\n");
+  const t3 = Date.now();
+
+  try {
+    const { pruneThreads } = await import("../lib/prune");
+    const result = pruneThreads({ dryRun: false });
+    if (result.candidates.length === 0) {
+      console.log("\n✅ PODA — No hay teatros que desactivar.");
+    } else {
+      console.log(`\n✅ PODA COMPLETADA — ${result.candidates.length} teatros desactivados en ${((Date.now() - t3) / 1000).toFixed(1)}s`);
+      for (const [reason, count] of Object.entries(result.byReason)) {
+        if (count > 0) console.log(`   ${reason}: ${count}`);
+      }
+      console.log(`   Quedan ${result.remainingActive} threads activos.`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`\n❌ PODA FALLÓ: ${msg}`);
+    console.error("La poda puede ejecutarse manualmente: npm run script:prune-threads");
+  }
+
+  /*
+   * FASE 4: CONEXIONES + META-ANÁLISIS (la "neurona")
+   */
+  console.log("\n🌐 FASE 4/4 — CONEXIONES ENTRE TEATROS Y META-ANÁLISIS\n");
+  const t4 = Date.now();
+
+  try {
+    const { detectThreadLinks } = await import("../lib/links");
+    const linkResult = await detectThreadLinks();
+    console.log(`\n✅ CONEXIONES — ${linkResult.confirmed} confirmadas, ${linkResult.rejected} rechazadas en ${((Date.now() - t4) / 1000).toFixed(1)}s`);
+
+    const { runMetaAnalysis } = await import("../lib/meta");
+    const metaResult = await runMetaAnalysis();
+    if (metaResult.metaId) {
+      console.log(`✅ META-ANÁLISIS guardado (id ${metaResult.metaId})`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`\n❌ META-ANÁLISIS FALLÓ: ${msg}`);
+    console.error("Puede ejecutarse manualmente: POST /api/meta");
   }
 
   /*

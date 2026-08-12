@@ -142,6 +142,23 @@ export const threads = sqliteTable("threads", {
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+  /*
+   * ENTIDADES DEL TEATRO — extraídas en cada análisis, sobrescritas como el
+   * state. Almacenadas como JSON arrays (text) porque SQLite no tiene arrays.
+   *
+   *   - countries:    códigos ISO 3166-1 alpha-2 de países que son ACTORES o
+   *                   ESCENARIO (no los mencionados de pasada).
+   *   - actors:       actores no estatales/supranacionales (OTAN, UE, Hezbolá,
+   *                   Gazprom, milicias, empresas).
+   *   - domains:      recursos/dominios materiales en juego (energía, agua,
+   *                   rutas marítimas, chips, tierras raras, armas, datos).
+   *                   Clave para conectar teatros por CADENA MATERIAL.
+   *   - tensionLevel: escalada 1-5 (1 latente → 5 conflicto abierto).
+   */
+  countries: text("countries"),
+  actors: text("actors"),
+  domains: text("domains"),
+  tensionLevel: integer("tension_level"),
 });
 
 /*
@@ -213,6 +230,64 @@ export const articleThreads = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.articleId, table.threadId] })],
 );
+
+/*
+ * thread_links — Conexiones entre teatros detectadas por el meta-análisis.
+ *
+ * A diferencia de la consolidación (que funde teatros que son el MISMO juego),
+ * un link es una RELACIÓN material entre dos teatros distintos que comparten
+ * cadena, bloque, presión coordinada, competencia por recurso, distracción o
+ * motor interno. La "neurona": conecta el tablero para revelar lo que ningún
+ * teatro revela por separado.
+ *
+ *   - linkType: tipo de conexión (enum cerrado).
+ *   - rationale: por qué están conectados, en términos MATERIALES.
+ *   - strength: 1-3 (débil → fuerte).
+ */
+export const threadLinks = sqliteTable("thread_links", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  threadA: integer("thread_a")
+    .notNull()
+    .references(() => threads.id),
+  threadB: integer("thread_b")
+    .notNull()
+    .references(() => threads.id),
+  linkType: text("link_type", {
+    enum: [
+      "cadena_material",
+      "mismo_bloque",
+      "presion_coordinada",
+      "competencia_recurso",
+      "distraccion",
+      "motor_interno",
+    ],
+  }).notNull(),
+  rationale: text("rationale").notNull(),
+  strength: integer("strength").notNull(),
+  detectedAt: text("detected_at").notNull(),
+});
+
+/*
+ * meta_analyses — Lectura del tablero GLOBAL (el "editorial").
+ *
+ * No resume teatros uno por uno: revela qué aporta el CONJUNTO. Producido por
+ * runMetaAnalysis() sobre los ~20 teatros más relevantes de los últimos 7 días
+ * y los thread_links detectados entre ellos.
+ */
+export const metaAnalyses = sqliteTable("meta_analyses", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  periodStart: text("period_start").notNull(),
+  periodEnd: text("period_end").notNull(),
+  systemReading: text("system_reading").notNull(),
+  blocFormation: text("bloc_formation").notNull(),
+  crossPatterns: text("cross_patterns").notNull(),
+  contradictions: text("contradictions").notNull(),
+  prediction: text("prediction").notNull(),
+  verdict: text("verdict").notNull(),
+  threadIds: text("thread_ids").notNull(),
+  createdAt: text("created_at").notNull(),
+  read: integer("read", { mode: "boolean" }).notNull().default(false),
+});
 
 /*
  * ============================================================================

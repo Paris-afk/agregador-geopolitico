@@ -9,6 +9,12 @@ import {
   buildConsolidatorPrompt,
   CHAT_PROMPT,
   buildChatContext,
+  DOMAINS_VOCABULARY,
+  domainsVocabularyText,
+  LINK_CLASSIFIER_PROMPT,
+  buildLinkClassifierPrompt,
+  META_PROMPT,
+  buildMetaPrompt,
 } from "./prompts";
 
 /*
@@ -47,6 +53,116 @@ const MODEL_FAST = process.env.DEEPSEEK_MODEL_FAST ?? "deepseek-v4-flash";
 const MODEL_SMART = process.env.DEEPSEEK_MODEL_SMART ?? "deepseek-v4-pro";
 
 /*
+ * ============================================================================
+ * NORMALIZACIÓN DE ENTIDADES (compartida)
+ * ============================================================================
+ * Estas funciones se reutilizan tanto en el análisis normal como en el
+ * backfill, para que los valores de countries/actors/domains/tensionLevel
+ * sean siempre consistentes.
+ */
+
+export function toCleanStringArray(v: unknown): string[] {
+  return Array.isArray(v)
+    ? Array.from(new Set(v.map((x) => String(x).trim()).filter((x) => x.length > 0)))
+    : [];
+}
+
+export function normalizeTensionLevel(v: unknown): number {
+  const raw = Number(v);
+  return Number.isFinite(raw) ? Math.min(5, Math.max(1, Math.round(raw))) : 1;
+}
+
+/*
+ * normalizeDomains — Filtra los dominios contra el VOCABULARIO CERRADO.
+ * Descarta cualquier valor que el modelo invente (sinónimos, acentos, etc.)
+ * y limita a un máximo de 4. Garantiza que teatros materialmente relacionados
+ * usen la MISMA etiqueta y crucen como cadena común.
+ */
+export function normalizeDomains(v: unknown): string[] {
+  const clean = toCleanStringArray(v);
+  const allowed = new Set<string>(DOMAINS_VOCABULARY);
+  return clean.filter((d) => allowed.has(d)).slice(0, 4);
+}
+
+export type EntityExtraction = {
+  countries: string[];
+  actors: string[];
+  domains: string[];
+  tensionLevel: number;
+};
+
+/*
+ * extractEntities — Backfill BARATO de entidades.
+ *
+ * Usa MODEL_FAST (flash) con un prompt corto de extracción, recibiendo solo
+ * título + state + verdict. Devuelve los cuatro campos de entidades.
+ * No ejecuta análisis completo — es una extracción ligera.
+ */
+export async function extractEntities(input: {
+  threadTitle: string;
+  threadState: string | null;
+  verdict: string | null;
+}): Promise<EntityExtraction> {
+  const system = `Eres un extractor de entidades geopolíticas. Recibes información sobre UN teatro estratégico y debes extraer sus entidades.
+
+Extrae SOLO de la información dada:
+- countries: array de códigos ISO 3166-1 alpha-2 (ej: "GR", "TR", "CY") de países que son ACTORES o ESCENARIO del teatro. No incluyas mencionados de pasada.
+- actors: array de actores NO ESTATALES o supranacionales (OTAN, UE, Hezbolá, Gazprom, milicias, empresas, instituciones).
+- domains: array de 1 a 4 dominios del VOCABULARIO CERRADO de abajo. Elige los que están MATERIALMENTE en juego. SOLO puedes usar estos valores EXACTOS (snake_case), nunca inventes ni uses sinónimos:
+${domainsVocabularyText()}
+  Si nada de la lista aplica, devuelve array vacío. NO inventes valores nuevos.
+- tensionLevel: integer 1-5 (1=latente, 2=tensión diplomática, 3=escalada, 4=crisis aguda, 5=conflicto abierto).
+
+Responde ÚNICAMENTE con JSON válido, sin markdown ni texto adicional:
+{
+  "countries": [],
+  "actors": [],
+  "domains": [],
+  "tensionLevel": 3
+}`;
+
+  const user = `TEATRO: ${input.threadTitle}
+
+ESTADO ACUMULADO:
+${input.threadState ?? "(sin estado previo)"}
+
+VEREDICTO DEL ÚLTIMO ANÁLISIS:
+${input.verdict ?? "(sin análisis previo)"}
+
+Extrae las entidades de este teatro. Responde solo con el JSON.`;
+
+  const completion = await client.chat.completions.create({
+    model: MODEL_FAST,
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw) throw new Error("DeepSeek (entidades) devolvió respuesta vacía");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("DeepSeek (entidades) no devolvió JSON válido");
+  }
+
+  const obj = (parsed ?? {}) as Record<string, unknown>;
+
+  return {
+    countries: toCleanStringArray(obj.countries),
+    actors: toCleanStringArray(obj.actors),
+    domains: normalizeDomains(obj.domains),
+    tensionLevel: normalizeTensionLevel(obj.tensionLevel),
+  };
+}
+
+
+/*
  * Tipos de entrada y salida de analyzeThread.
  *
  * AnalysisInput: lo que recibe la función.
@@ -74,6 +190,10 @@ export type AnalysisOutput = {
   prediction: string;
   verdict: string;
   newState: string;
+  countries: string[];
+  actors: string[];
+  domains: string[];
+  tensionLevel: number;
 };
 
 /*
@@ -210,6 +330,10 @@ export async function analyzeThread(
     "prediction",
     "verdict",
     "newState",
+    "countries",
+    "actors",
+    "domains",
+    "tensionLevel",
   ];
 
   const missing = requiredKeys.filter((k) => !(k in obj));
@@ -217,7 +341,24 @@ export async function analyzeThread(
     throw new Error(`DeepSeek devolvió JSON incompleto. Faltan las claves: ${missing.join(", ")}`);
   }
 
-  return obj as AnalysisOutput;
+  /*
+   * Normalizar los campos de entidades: el modelo puede devolver arrays
+   * con valores no limpios. Usamos las funciones compartidas para que sean
+   * consistentes con el backfill.
+   */
+  return {
+    summary: obj.summary as string,
+    cuiBono: obj.cuiBono as string,
+    saidVsDone: obj.saidVsDone as string,
+    deviation: obj.deviation as string,
+    prediction: obj.prediction as string,
+    verdict: obj.verdict as string,
+    newState: obj.newState as string,
+    countries: toCleanStringArray(obj.countries),
+    actors: toCleanStringArray(obj.actors),
+    domains: normalizeDomains(obj.domains),
+    tensionLevel: normalizeTensionLevel(obj.tensionLevel),
+  };
 }
 
 /*
@@ -346,8 +487,19 @@ export async function classifyArticles(input: ClassifyInput): Promise<ClassifyOu
  * que mantenerlos separados ahorra tokens y latencia en el día a día.
  */
 
+export type ConsolidatorThread = {
+  id: number;
+  title: string;
+  description: string | null;
+  state: string | null;
+  countries: string[];
+  actors: string[];
+  domains: string[];
+  tensionLevel: number | null;
+};
+
 export type ConsolidatorInput = {
-  threads: Array<{ id: number; title: string; description: string | null }>;
+  threads: ConsolidatorThread[];
 };
 
 export type MergeGroup = {
@@ -406,6 +558,81 @@ export async function findDuplicateThreads(
   }
 
   return { mergeGroups: obj.mergeGroups as MergeGroup[] };
+}
+
+/*
+ * mergeThreadStates — Fusiona las memorias (states) de varios threads que
+ * van a unificarse en UN state de máximo ~350 palabras.
+ *
+ * Crítico: sin esto, al absorber threads se pierde historia acumulada
+ * silenciosamente. El state unificado debe preservar lo esencial de cada
+ * uno y servir como memoria del teatro ampliado.
+ */
+export async function mergeThreadStates(input: {
+  threads: Array<{ id: number; title: string; state: string | null }>;
+}): Promise<{ mergedState: string }> {
+  const system = `Eres un analista geopolítico veterano. Se te dan las MEMORIAS ACUMULADAS (states) de varios teatros que van a FUSIONARSE en uno solo porque son facetas del mismo juego estratégico.
+
+Tu tarea: producir UNA memoria unificada (state) para el teatro fusionado.
+- Máximo ~350 palabras.
+- Preserva lo esencial de CADA teatro: actores clave, posiciones, tendencias, puntos de inflexión.
+- Comprime lo redundante (lo que los teatros comparten se dice una vez).
+- Integra lo nuevo con lo viejo de forma coherente.
+- Debe servir como memoria para el próximo análisis del teatro fusionado.
+- Escribe SIEMPRE en español.
+
+Responde ÚNICAMENTE con el texto del state unificado, sin JSON, sin markdown, sin prefacios.`;
+
+  const user = input.threads
+    .map((t) => `TEATRO ${t.id} — ${t.title}:\n${t.state ?? "(sin memoria)"}`)
+    .join("\n\n---\n\n");
+
+  const completion = await client.chat.completions.create({
+    model: MODEL_FAST,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+
+  const raw = completion.choices[0]?.message?.content ?? "";
+  if (!raw.trim()) throw new Error("DeepSeek (merge states) devolvió respuesta vacía");
+  return { mergedState: raw.trim().slice(0, 2000) };
+}
+
+/*
+ * proposeMergedTitle — Propone un título NUEVO para el teatro fusionado.
+ * Debe reflejar el teatro ampliado, no heredar el título de uno de los trozos.
+ */
+export async function proposeMergedTitle(input: {
+  titles: string[];
+  mergedState: string;
+}): Promise<string> {
+  const system = `Eres un analista geopolítico veterano. Varios teatros se han fusionado en uno. Propón un TÍTULO NUEVO para el teatro fusionado que refleje el teatro ampliado (el juego estratégico completo), NO el título de uno de los trozos.
+
+- Máximo 10 palabras, en español.
+- Formato sugerido: "[Actor] — [acción/conflicto] — [región]" (ej: "Turquía — proyección regional y autonomía estratégica").
+- Conciso, descriptivo, sin puntuación rara.
+- Responde ÚNICAMENTE con el título, sin comillas ni texto adicional.`;
+
+  const user = `TÍTULOS DE LOS TEATROS QUE SE FUSIONAN:\n${input.titles.map((t) => `- ${t}`).join("\n")}
+
+MEMORIA UNIFICADA:\n${input.mergedState.slice(0, 1500)}
+
+Propón el título del teatro fusionado.`;
+
+  const completion = await client.chat.completions.create({
+    model: MODEL_FAST,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+
+  const title = (completion.choices[0]?.message?.content ?? "").trim();
+  return title.replace(/^["']|["']$/g, "").slice(0, 100);
 }
 
 /*
@@ -483,4 +710,145 @@ export async function askThread(input: AskThreadInput): Promise<AskThreadOutput>
   }
 
   return { answer, tokensUsed };
+}
+
+/*
+ * ============================================================================
+ * DETECCIÓN DE CONEXIONES (links) + META-ANÁLISIS
+ * ============================================================================
+ */
+
+export type LinkClassification = {
+  connected: boolean;
+  linkType?: "cadena_material" | "mismo_bloque" | "presion_coordinada" | "competencia_recurso" | "distraccion" | "motor_interno";
+  rationale?: string;
+  strength?: number;
+};
+
+export type ClassifyLinkInput = {
+  threadA: { id: number; title: string; state: string | null };
+  threadB: { id: number; title: string; state: string | null };
+  sharedDomains: string[];
+  rareCountries: string[];
+  rareActors: string[];
+};
+
+/*
+ * classifyLink — Pregunta al modelo (MODEL_FAST) si dos teatros tienen una
+ * relación material real y de qué tipo. Puede responder "sin conexión".
+ */
+export async function classifyLink(input: ClassifyLinkInput): Promise<LinkClassification> {
+  const userPrompt = buildLinkClassifierPrompt(input);
+
+  const completion = await client.chat.completions.create({
+    model: MODEL_FAST,
+    temperature: 0.2,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: LINK_CLASSIFIER_PROMPT },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw) throw new Error("DeepSeek (link) devolvió respuesta vacía");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("DeepSeek (link) no devolvió JSON válido");
+  }
+
+  const obj = (parsed ?? {}) as Record<string, unknown>;
+
+  if (obj.connected === false) {
+    return { connected: false };
+  }
+
+  const strength = Number(obj.strength);
+  return {
+    connected: true,
+    linkType: obj.linkType as LinkClassification["linkType"],
+    rationale: typeof obj.rationale === "string" ? obj.rationale : "",
+    strength: Number.isFinite(strength) ? Math.min(3, Math.max(1, Math.round(strength))) : 1,
+  };
+}
+
+export type MetaAnalysisResult = {
+  systemReading: string;
+  blocFormation: string;
+  crossPatterns: string;
+  contradictions: string;
+  prediction: string;
+  verdict: string;
+};
+
+export type RunMetaInput = {
+  threads: Array<{
+    id: number;
+    title: string;
+    state: string | null;
+    verdict: string | null;
+    countries: string[];
+    actors: string[];
+    domains: string[];
+    tensionLevel: number | null;
+  }>;
+  links: Array<{
+    threadA: number;
+    threadB: number;
+    linkType: string;
+    rationale: string;
+    strength: number;
+  }>;
+};
+
+/*
+ * runMetaAnalysisLLM — Llama a MODEL_SMART con el META_PROMPT para producir
+ * la lectura del tablero global. Devuelve el JSON con los 6 campos.
+ */
+export async function runMetaAnalysisLLM(input: RunMetaInput): Promise<MetaAnalysisResult> {
+  const userPrompt = buildMetaPrompt(input);
+
+  const completion = await client.chat.completions.create({
+    model: MODEL_SMART,
+    reasoning_effort: "high",
+    // @ts-expect-error — extra_body no está en los tipos del SDK de OpenAI
+    extra_body: { thinking: { type: "enabled" } },
+    max_tokens: 12000,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: META_PROMPT },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const raw = completion.choices[0]?.message?.content;
+  if (!raw) throw new Error("DeepSeek (meta) devolvió respuesta vacía");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    const preview = raw.length > 300 ? raw.slice(0, 300) + "..." : raw;
+    throw new Error(`DeepSeek (meta) no devolvió JSON válido. Respuesta: ${preview}`);
+  }
+
+  const obj = (parsed ?? {}) as Record<string, unknown>;
+
+  const required: (keyof MetaAnalysisResult)[] = [
+    "systemReading",
+    "blocFormation",
+    "crossPatterns",
+    "contradictions",
+    "prediction",
+    "verdict",
+  ];
+  const missing = required.filter((k) => !(k in obj));
+  if (missing.length > 0) {
+    throw new Error(`DeepSeek (meta) devolvió JSON incompleto. Faltan: ${missing.join(", ")}`);
+  }
+
+  return obj as MetaAnalysisResult;
 }

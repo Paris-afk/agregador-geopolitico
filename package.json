@@ -15,7 +15,9 @@
     "db:fix-status": "npx tsx src/lib/db/fix-classification-status.ts",
     "job:daily": "tsx src/jobs/daily.ts",
     "job:weekly": "tsx src/jobs/weekly.ts",
-    "script:clean-images": "tsx src/scripts/clean-images.ts"
+    "script:clean-images": "tsx src/scripts/clean-images.ts",
+    "script:backfill-entities": "tsx src/scripts/backfill-entities.ts",
+    "script:prune-threads": "tsx src/scripts/prune-threads.ts"
   },
   "dependencies": {
     "@extractus/article-extractor": "^9.0.0",

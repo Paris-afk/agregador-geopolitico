@@ -15,6 +15,46 @@
  *   - La predicción debe ser FALSABLE con condición de falsación explícita.
  */
 
+/*
+ * ============================================================================
+ * VOCABULARIO CERRADO DE DOMINIOS
+ * ============================================================================
+ * domains pasa de texto libre a VOCABULARIO CERRADO para que teatros
+ * materialmente relacionados crucen como cadena común (ej: "energía nuclear"
+ * y "energía" → ambos "energia_nuclear" / "energia_fosil").
+ *
+ * El modelo debe elegir ÚNICAMENTE de esta lista. En código, filtramos contra
+ * esta constante (whitelist) para descartar cualquier valor inventado.
+ */
+export const DOMAINS_VOCABULARY = [
+  "energia_fosil", // petróleo, gas, oleoductos, gasoductos, refinerías
+  "energia_nuclear", // reactores, enriquecimiento, combustible nuclear
+  "energia_renovable", // solar, eólica, hidrógeno, redes eléctricas
+  "rutas_maritimas", // estrechos, canales, puertos, tránsito naval
+  "rutas_terrestres", // corredores ferroviarios, carreteras, oleoductos terrestres
+  "minerales_criticos", // tierras raras, litio, cobalto, uranio
+  "semiconductores", // chips, litografía, fabricación electrónica
+  "armas_convencionales", // drones, misiles, blindados, munición, aviación
+  "armas_estrategicas", // nuclear militar, hipersónicos, espacio, disuasión
+  "agua_alimentos", // agua, presas, granos, fertilizantes, pesca
+  "finanzas", // sanciones, divisas, deuda, bancos, sistemas de pago
+  "datos_infraestructura", // cables submarinos, satélites, nubes, ciber
+  "migracion", // flujos migratorios, refugiados, control fronterizo
+  "industria_manufactura", // cadenas de suministro industriales, motores, astilleros
+  "territorio", // soberanía territorial, fronteras disputadas, ocupación
+  "influencia_politica", // injerencia, propaganda, alineamiento de bloques
+] as const;
+
+export type DomainValue = (typeof DOMAINS_VOCABULARY)[number];
+
+/*
+ * Formatea la lista como texto legible para inyectarla en los prompts
+ * (analista y backfill), con la descripción entre paréntesis.
+ */
+export function domainsVocabularyText(): string {
+  return DOMAINS_VOCABULARY.map((d) => `  - ${d}`).join("\n");
+}
+
 export const SYSTEM_PROMPT = `Eres un analista geopolítico de élite con décadas de experiencia en inteligencia estratégica. Tu método de trabajo es riguroso, cínico y basado exclusivamente en hechos verificables. Trabajas para un think tank independiente. Tu análisis será leído por tomadores de decisiones.
 
 REGLAS DE IDIOMA (OBLIGATORIAS, SIN EXCEPCIÓN):
@@ -71,8 +111,21 @@ Responde ÚNICA Y EXCLUSIVAMENTE con un objeto JSON válido. No incluyas markdow
   "deviation": "Desviaciones detectadas respecto a la memoria previa, o 'Primer análisis del hilo' si no aplica",
   "prediction": "Predicción falsable con condición de falsación explícita",
   "verdict": "Veredicto final contundente en español (una frase directa)",
-  "newState": "Síntesis ACTUALIZADA del estado del hilo. Integra lo que ya se sabía (si hay memoria previa) con lo nuevo. MÁXIMO ~350 PALABRAS. No es un archivo histórico: comprime y resume lo viejo, integra lo nuevo, y produce una fotografía concisa del estado actual del teatro. Incluye: actores clave y sus posiciones actuales, tendencia detectada (escalada, estabilización, desescalada), y próximos puntos de inflexión esperados."
-}`;
+  "newState": "Síntesis ACTUALIZADA del estado del hilo. Integra lo que ya se sabía (si hay memoria previa) con lo nuevo. MÁXIMO ~350 PALABRAS. No es un archivo histórico: comprime y resume lo viejo, integra lo nuevo, y produce una fotografía concisa del estado actual del teatro. Incluye: actores clave y sus posiciones actuales, tendencia detectada (escalada, estabilización, desescalada), y próximos puntos de inflexión esperados.",
+  "countries": ["GR", "TR", "CY"],
+  "actors": ["OTAN", "UE", "Gazprom"],
+  "domains": ["energia_nuclear", "rutas_maritimas", "armas_convencionales"],
+  "tensionLevel": 3
+}
+
+ENTIDADES DEL TEATRO (4 campos nuevos, OBLIGATORIOS):
+- "countries": array de códigos ISO 3166-1 alpha-2 (ej: "GR", "TR", "CY") de los países que son ACTORES o ESCENARIO del teatro. NO incluyas países mencionados de pasada o que solo contextualizan.
+- "actors": array de actores NO ESTATALES o supranacionales relevantes (OTAN, UE, ONU, Hezbolá, Gazprom, milicias, empresas, instituciones). Excluye los estados (esos van en countries).
+- "domains": array de 1 a 4 dominios del VOCABULARIO CERRADO de abajo. Elige los que están MATERIALMENTE en juego. Este campo es CLAVE: conecta teatros por cadena material, no por tema. SOLO puedes usar estos valores EXACTOS (snake_case), nunca inventes ni uses sinónimos:
+${domainsVocabularyText()}
+  Si nada de la lista aplica, devuelve array vacío. NO inventes valores nuevos.
+- "tensionLevel": integer 1-5 según tu evaluación del análisis: 1 = latente, 2 = tensión diplomática, 3 = escalada, 4 = crisis aguda, 5 = conflicto abierto. Sé realista con la evidencia, no uses 5 salvo combate abierto confirmado.
+Todos los valores de countries deben ser códigos ISO alpha-2 válidos (2 letras, mayúsculas). actors en español. Sin duplicados.`;
 
 /*
  * Prompt de usuario que se envía junto con los artículos y el contexto.
@@ -291,33 +344,34 @@ Clasifica cada artículo. Responde EXCLUSIVAMENTE con el objeto JSON.`;
  * Los hilos que no aparecen en ningún grupo son únicos y se dejan intactos.
  */
 
-export const CONSOLIDATOR_PROMPT = `Eres un analista geopolítico veterano con 30 años de experiencia en inteligencia estratégica. Tu trabajo es examinar una base de datos de hilos geopolíticos y decidir cuáles deben FUSIONARSE porque representan frentes distintos del MISMO teatro estratégico.
+export const CONSOLIDATOR_PROMPT = `Eres un analista geopolítico veterano con 30 años de experiencia en inteligencia estratégica. Tu trabajo es examinar grupos de hilos geopolíticos y decidir cuáles son FACETAS DEL MISMO JUEGO ESTRATÉGICO y deben fusionarse.
 
 PRINCIPIO RECTOR: UN HILO = UN TEATRO ESTRATÉGICO
 
-Un teatro estratégico es un espacio coherente definido por TRES ejes: actores centrales, geografía e intereses estructurales (recursos, rutas, poder). Varios hilos pueden cubrir frentes o incidentes distintos de ese mismo teatro y DEBEN fusionarse. Pero hilos con lógicas distintas —aunque compartan actores— se MANTIENEN SEPARADOS.
+Los hilos que se te dan ya comparten entidades estructurales (dominios y países/actores) — el pre-filtro los marcó como candidatos. Tu trabajo es decidir si son el MISMO tablero jugado desde frentes distintos.
 
-REGLAS DE FUSIÓN:
+FUSIONA cuando:
+- El mismo actor persigue el mismo objetivo material por vías distintas (diplomática, militar, económica).
+- Los teatros son ESLABONES de una misma cadena (logística, energética, industrial): el control de un eslabón determina el siguiente.
+- La política interna de un actor es el MOTOR de su proyección externa (la política doméstica explica la acción exterior y viceversa).
 
-1. FUSIONA hilos que comparten ACTOR CENTRAL + GEOGRAFÍA + INTERÉS ESTRUCTURAL, aunque sus títulos describan frentes o incidentes distintos. Son manifestaciones del MISMO juego estratégico. Ejemplos que DEBEN fusionarse:
-   - "Pruebas militares China Pacífico" + "Tensiones estrecho Taiwán" + "Disputas Mar de China Meridional" + "Influencia global china": todos son frentes de la proyección de poder china en el Indo-Pacífico. Mismo actor (China), misma región (Asia-Pacífico), mismo interés (hegemonía regional).
-   - "Guerra Ucrania" + "Sabotaje Nord Stream" + "Influencia rusa en Alemania" + "Represión de medios rusos en Occidente": dominios militar, energético e informativo de la misma confrontación Rusia-Occidente.
-   - "Sanciones energéticas a Rusia" + "Diversificación gas europeo": mismo teatro energético europeo post-invasión.
-   - "Presencia militar rusa en Siria" + "Acuerdos de defensa Rusia-Irán" + "Influencia rusa en Libia": expansión de la influencia militar rusa en Medio Oriente y Norte de África.
+SÉ AGRESIVO al fusionar. Un mapa con 20 teatros bien definidos vale más que uno con 60 fragmentos: los fragmentos impiden ver el patrón. Si dudas entre fusionar o separar, FUSIONA.
 
-2. NO FUSIONES hilos que, aunque compartan actores, responden a LÓGICAS ESTRATÉGICAS Y SOLUCIONES DISTINTAS. Ejemplos que DEBEN permanecer separados:
-   - "Cuestión de Chipre" y "Tensiones Egeo Grecia-Turquía": ambos son Grecia vs Turquía, pero Chipre (isla dividida con marco ONU, tratados de garantía, dimensión étnica) tiene una lógica completamente distinta de la disputa marítima del Egeo (ZEE, plataforma continental, derecho del mar). Las soluciones son diferentes. SEPARADOS.
-   - Proyecciones turcas en teatros distintos: "Egipto-Turquía" (Mediterráneo Oriental), "Turquía-Irak energético" (petróleo kurdo), "Turquía mediación en África" (influencia soft en el Sahel). Son estrategias de Ankara en geografías y con intereses distintos. SEPARADOS.
-   - "Cumbres del G20" y "Crisis de deuda global": comparten actores (potencias económicas) pero uno es institucional/diplomático y otro es financiero/sistémico. SEPARADOS.
+MANTÉN SEPARADOS SOLO cuando las lógicas son genuinamente distintas:
+- Distintos actores principales.
+- Distintos recursos en juego.
+- Dinámicas que evolucionan con independencia real (ej: Chipre y el Egeo comparten actores Grecia-Turquía pero tienen marcos jurídicos y temporalidades distintas).
 
-3. SÉ DECIDIDO. El sesgo actual es NO fusionar nada por miedo a equivocarse. Eso es peor que fusionar de más: un teatro fragmentado en 15 micro-hilos es inútil para el analista. Si dos o más hilos claramente pertenecen al mismo teatro estratégico según la regla de los tres ejes, FUSIÓNALOS. Pero no fusiones teatros genuinamente distintos.
+⚠️ PROHIBIDO CREAR MACRO-TEATROS:
+NO crees macro-teatros continentales o civilizatorios (tipo "Occidente", "Eurasia", "el Sur Global", "Europa", "el mundo árabe"). Un teatro debe tener un ACTOR PRINCIPAL identificable y un RECURSO O OBJETIVO CONCRETO en juego (una disputa concreta, un corredor, un recurso, un régimen específico). Si el título que se te ocurre para la fusión es tan amplio que podría contener cualquier noticia de esa región, NO fusiones — los teatros involucrados no son facetas del mismo juego, son juegos distintos que comparten geografía.
 
-4. ELECCIÓN DEL CANÓNICO Y TÍTULO SUGERIDO:
-   - Elige como "canonical" el hilo cuyo título mejor capture el TEATRO COMPLETO, no solo uno de sus frentes. Prefiere títulos que nombren el conflicto estratégico, no un incidente.
-   - Si NINGUNO de los títulos existentes captura bien el teatro (ej: los hilos se llaman "Pruebas chinas agosto 2026" y "Taiwán ejercicios 2026" pero el teatro real es el Indo-Pacífico), añade un campo "suggestedTitle" con un título NUEVO que describa mejor el teatro completo. Máximo 10 palabras en español, formato: "[Actor] - [Acción/Conflicto] - [Región]".
-   - Si uno de los títulos existentes ya sirve, omite suggestedTitle.
+EJEMPLO DE MACRO-TEATRO PROHIBIDO: fusionar "Confrontación Rusia-OTAN" + "Crisis migratoria en Europa" + "Presupuesto UE" en "Occidente — fractura transatlántica". Eso no discrimina nada: mezcla una guerra, un flujo migratorio y una disputa presupuestaria que tienen lógicas distintas. NO lo hagas.
 
-IDIOMA: Todo el output debe estar en ESPAÑOL. Los suggestedTitle también en español.
+ELECCIÓN DEL CANÓNICO:
+- Elige como "canonical" el hilo con MÁS sustancia (más artículos, mayor tensionLevel, state más desarrollado). No importa su título.
+- "suggestedTitle" es OBLIGATORIO: propón un título NUEVO que refleje el teatro AMPLIADO (ej: "Turquía — proyección regional y autonomía estratégica"). No heredes el título de un trozo.
+
+IDIOMA: Todo el output en ESPAÑOL. Los suggestedTitle también.
 
 FORMATO DE RESPUESTA (OBLIGATORIO):
 Responde ÚNICA Y EXCLUSIVAMENTE con un objeto JSON válido. Sin markdown, sin explicaciones:
@@ -325,23 +379,48 @@ Responde ÚNICA Y EXCLUSIVAMENTE con un objeto JSON válido. Sin markdown, sin e
 {
   "mergeGroups": [
     { "canonical": 19, "duplicates": [45, 46, 50], "suggestedTitle": "Proyección de poder china en el Indo-Pacífico" },
-    { "canonical": 2, "duplicates": [20, 23, 11] }
+    { "canonical": 2, "duplicates": [20, 23, 11], "suggestedTitle": "Confrontación Rusia-Occidente" }
   ]
 }
 
 - canonical: id del hilo que se CONSERVA
 - duplicates: ids de los hilos que se FUSIONAN en el canónico
-- suggestedTitle (OPCIONAL): si ningún título existente captura bien el teatro, propón uno nuevo en español (máx 10 palabras). Si uno de los títulos existentes ya es adecuado, omite este campo.
-- Si realmente no hay hilos que fusionar, devuelve { "mergeGroups": [] }`;
+- suggestedTitle: título NUEVO del teatro fusionado (obligatorio en cada grupo)
+- Si un grupo no debe fusionarse, NO lo incluyas en la respuesta.`;
 
 export function buildConsolidatorPrompt(input: {
-  threads: Array<{ id: number; title: string; description: string | null }>;
+  threads: ConsolidatorThreadPrompt[];
 }): string {
-  return `HILOS A REVISAR (identifica teatros estratégicos que deban fusionarse):
-${JSON.stringify(input.threads, null, 2)}
+  const block = input.threads
+    .map(
+      (t) => `- ID ${t.id}
+  Título: ${t.title}
+  Descripción: ${t.description ?? "(sin descripción)"}
+  State (resumido): ${(t.state ?? "").slice(0, 400) || "(sin state)"}
+  Países: ${t.countries.length ? t.countries.join(", ") : "—"}
+  Actores: ${t.actors.length ? t.actors.join(", ") : "—"}
+  Dominios: ${t.domains.length ? t.domains.join(", ") : "—"}
+  Tensión: ${t.tensionLevel ?? "—"}`
+    )
+    .join("\n\n");
 
-Agrupa los hilos que pertenecen al MISMO TEATRO ESTRATÉGICO (actor + geografía + interés estructural compartidos). Responde EXCLUSIVAMENTE con el objeto JSON.`;
+  return `GRUPO DE HILOS CANDIDATOS A FUSIÓN (comparten entidades estructurales):
+
+${block}
+
+Decide si son facetas del MISMO juego estratégico y deben fusionarse. Aplica el criterio agresivo. Responde EXCLUSIVAMENTE con el objeto JSON.`;
 }
+
+type ConsolidatorThreadPrompt = {
+  id: number;
+  title: string;
+  description: string | null;
+  state: string | null;
+  countries: string[];
+  actors: string[];
+  domains: string[];
+  tensionLevel: number | null;
+};
 
 /*
  * ============================================================================
@@ -421,4 +500,134 @@ ${analysisSection}
 ${articlesSection}
 
 Responde a la pregunta del usuario usando este contexto. Recuerda las reglas: no inventes, distingue confirmado vs hipótesis, cita fuentes cuando puedas.`;
+}
+
+/*
+ * ============================================================================
+ * LINK_CLASSIFIER_PROMPT — Clasifica la relación MATERIAL entre dos teatros.
+ * ============================================================================
+ *
+ * A diferencia de la consolidación (que funde teatros que son el MISMO juego),
+ * aquí determinamos si dos teatros DISTINTOS están conectados por una relación
+ * material, y de qué tipo. Debe poder rechazar conexiones casuales.
+ */
+export const LINK_CLASSIFIER_PROMPT = `Eres un analista geopolítico veterano. Te doy DOS teatros distintos con sus entidades estructurales (países, actores, dominios del vocabulario material) y las entidades RARAS que comparten. Determina si hay una RELACIÓN MATERIAL real entre ellos, y de qué tipo.
+
+TIPOS DE CONEXIÓN:
+- cadena_material: son eslabones de la MISMA cadena de suministro o logística (comparten rutas_maritimas, minerales_criticos, energia_*, semiconductores) disputada en puntos distintos.
+- mismo_bloque: pertenecen al mismo bloque/alianza y se refuerzan mutuamente (misma coalición, misma campaña de bloque).
+- presion_coordinada: un actor o grupo de actores presiona en AMBOS frentes a la vez con un objetivo común (estrategia coordinada).
+- competencia_recurso: ambos compiten por el MISMO recurso o infraestructura concreta (gas de un campo, acceso a un puerto, control de una ruta).
+- distraccion: un actor abre o mantiene un frente para DISTRAER de otro más importante.
+- motor_interno: la política interna de un actor es el MOTOR de su acción en el otro teatro.
+
+REGLA CRÍTICA:
+Si el solapamiento es CASUAL (comparten un país mencionado de pasada, o un actor genérico, pero no hay relación material real entre las dinámicas), responde "sin conexión". NO fuerces conexiones: es mejor no conectar que conectar mal.
+
+El rationale debe ser en términos MATERIALES (recursos, rutas, cadenas, presión coordinada), no temáticos ("ambos hablan de Europa").
+
+FORMATO DE RESPUESTA (JSON obligatorio, sin markdown):
+{
+  "connected": true,
+  "linkType": "cadena_material" | "mismo_bloque" | "presion_coordinada" | "competencia_recurso" | "distraccion" | "motor_interno",
+  "rationale": "Explicación material en 1-2 frases en español",
+  "strength": 1 | 2 | 3
+}
+O si no hay conexión:
+{
+  "connected": false
+}`;
+
+export function buildLinkClassifierPrompt(input: {
+  threadA: { id: number; title: string; state: string | null };
+  threadB: { id: number; title: string; state: string | null };
+  sharedDomains: string[];
+  rareCountries: string[];
+  rareActors: string[];
+}): string {
+  return `TEATRO A (${input.threadA.id}): ${input.threadA.title}
+Estado (resumido): ${(input.threadA.state ?? "").slice(0, 500) || "(sin state)"}
+
+TEATRO B (${input.threadB.id}): ${input.threadB.title}
+Estado (resumido): ${(input.threadB.state ?? "").slice(0, 500) || "(sin state)"}
+
+ENTIDADES RARAS QUE COMPARTEN:
+- Dominios: ${input.sharedDomains.join(", ") || "—"}
+- Países raros: ${input.rareCountries.join(", ") || "—"}
+- Actores raros: ${input.rareActors.join(", ") || "—"}
+
+¿Hay una relación MATERIAL real entre estos dos teatros? Responde EXCLUSIVAMENTE con el JSON.`;
+}
+
+/*
+ * ============================================================================
+ * META_PROMPT — Lectura del tablero GLOBAL (el editorial).
+ * ============================================================================
+ *
+ * No resume teatros uno por uno. Revela qué aporta el CONJUNTO que ningún
+ * teatro revela por separado. Es la capa "neurona".
+ */
+export const META_PROMPT = `Eres el analista jefe de un think tank. Recibes un CONJUNTO de teatros geopolíticos (con sus estados acumulados, veredictos, entidades y conexiones detectadas entre ellos). No resumas los teatros uno por uno. Tu trabajo es responder: ¿QUÉ REVELA EL CONJUNTO QUE NINGÚN TEATRO REVELA POR SEPARADO?
+
+- ACTORES TRANSVERSALES: identifica quién aparece en varios teatros y determina si sus movimientos están COORDINADOS o son independientes. Un actor que presiona en tres frentes a la vez está ejecutando una estrategia; uno que reacciona en tres frentes está a la defensiva.
+- CADENAS MATERIALES: usa los dominios compartidos. Si varios teatros comparten rutas_maritimas o minerales_criticos, no es coincidencia temática: es la misma cadena de suministro siendo disputada en distintos eslabones.
+- FORMACIÓN DE BLOQUES: qué alineamientos se consolidan y cuáles se rompen. Vocabulario: DragonBear, Pax Silica, motor soberano, bipolaridad, hedging, estado bisagra, autonomía estratégica.
+- CONTRADICCIONES: cuando un actor hace en un frente lo contrario de lo que hace en otro. Ahí está la verdad de sus prioridades reales.
+- EJEMPLO del salto esperado: una noticia sobre una ruta polar china no es 'política antártica' — es redundancia logística fuera del alcance del control marítimo estadounidense, coherente con el Ártico ruso y con la diversificación frente al estrecho de Malaca.
+- PREDICCIÓN SISTÉMICA falsable, con condición y fecha.
+- VEREDICTO brutal sobre hacia dónde va el tablero.
+
+IDIOMA: Todo en ESPAÑOL.
+
+FORMATO DE RESPUESTA (JSON obligatorio, sin markdown):
+{
+  "systemReading": "Lectura del tablero global (2-3 párrafos)",
+  "blocFormation": "Cómo se consolidan o rompen los bloques (1-2 párrafos)",
+  "crossPatterns": "Patrones que cruzan varios teatros (1-2 párrafos)",
+  "contradictions": "Contradicciones de actores entre frentes (1-2 párrafos)",
+  "prediction": "Predicción sistémica falsable con condición y fecha",
+  "verdict": "Veredicto brutal sobre hacia dónde va el tablero (1 frase contundente)"
+}`;
+
+export function buildMetaPrompt(input: {
+  threads: Array<{
+    id: number;
+    title: string;
+    state: string | null;
+    verdict: string | null;
+    countries: string[];
+    actors: string[];
+    domains: string[];
+    tensionLevel: number | null;
+  }>;
+  links: Array<{
+    threadA: number;
+    threadB: number;
+    linkType: string;
+    rationale: string;
+    strength: number;
+  }>;
+}): string {
+  const threadsBlock = input.threads
+    .map(
+      (t) => `- ${t.id} — ${t.title}
+  Verdict: ${t.verdict ?? "(sin análisis)"}
+  State (resumido): ${(t.state ?? "").slice(0, 300) || "(sin state)"}
+  Países: ${t.countries.join(", ") || "—"} | Actores: ${t.actors.join(", ") || "—"} | Dominios: ${t.domains.join(", ") || "—"} | Tensión: ${t.tensionLevel ?? "—"}`
+    )
+    .join("\n\n");
+
+  const linksBlock = input.links.length
+    ? input.links
+        .map((l) => `- [${l.threadA} <-> ${l.threadB}] (${l.linkType}, fuerza ${l.strength}): ${l.rationale}`)
+        .join("\n")
+    : "Sin conexiones detectadas.";
+
+  return `TEATROS RELEVANTES DEL PERÍODO:
+${threadsBlock}
+
+CONEXIONES DETECTADAS ENTRE ELLOS:
+${linksBlock}
+
+¿Qué revela el CONJUNTO que ningún teatro revela por separado? Responde EXCLUSIVAMENTE con el JSON.`;
 }
