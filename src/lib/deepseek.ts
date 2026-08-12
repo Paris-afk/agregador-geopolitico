@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import {
-  SYSTEM_PROMPT,
+  buildSystemPrompt,
   buildUserPrompt,
   buildUserPromptRetry,
   CLASSIFIER_PROMPT,
@@ -13,7 +13,7 @@ import {
   domainsVocabularyText,
   LINK_CLASSIFIER_PROMPT,
   buildLinkClassifierPrompt,
-  META_PROMPT,
+  buildMetaSystemPrompt,
   buildMetaPrompt,
 } from "./prompts";
 
@@ -248,7 +248,7 @@ export async function analyzeThread(
      */
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: buildSystemPrompt(new Date().toLocaleDateString("es-ES", { weekday: "long", year: "numeric", month: "long", day: "numeric" })) },
       { role: "user", content: userPrompt },
     ],
   });
@@ -780,7 +780,10 @@ export type MetaAnalysisResult = {
   blocFormation: string;
   crossPatterns: string;
   contradictions: string;
-  prediction: string;
+  predictionStatement: string;
+  predictionCondition: string;
+  predictionFalsification: string;
+  predictionReviewDate: string | null;
   verdict: string;
 };
 
@@ -804,12 +807,42 @@ export type RunMetaInput = {
   }>;
 };
 
+const META_REQUIRED_KEYS: (keyof MetaAnalysisResult)[] = [
+  "systemReading",
+  "blocFormation",
+  "crossPatterns",
+  "contradictions",
+  "predictionStatement",
+  "predictionCondition",
+  "predictionFalsification",
+  "verdict",
+];
+
 /*
- * runMetaAnalysisLLM — Llama a MODEL_SMART con el META_PROMPT para producir
- * la lectura del tablero global. Devuelve el JSON con los 6 campos.
+ * isValidReviewDate — Valida que la fecha de revisión sea FUTURA respecto a
+ * hoy, entre 30 y 180 días.
  */
-export async function runMetaAnalysisLLM(input: RunMetaInput): Promise<MetaAnalysisResult> {
-  const userPrompt = buildMetaPrompt(input);
+function isValidReviewDate(reviewDate: string | undefined, today: Date): boolean {
+  if (!reviewDate) return false;
+  const d = new Date(reviewDate);
+  if (isNaN(d.getTime())) return false;
+  const days = Math.floor((d.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+  return days >= 30 && days <= 180;
+}
+
+/*
+ * callMeta — Llama a MODEL_SMART con el META_PROMPT y parsea el resultado.
+ * forceFutureDate: en el reintento, añade un aviso reforzado sobre la fecha.
+ */
+async function callMeta(input: RunMetaInput, forceFutureDate: boolean): Promise<Record<string, unknown>> {
+  const today = new Date();
+  const todayStr = today.toLocaleDateString("es-ES", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const systemPrompt = buildMetaSystemPrompt(todayStr);
+
+  let userPrompt = buildMetaPrompt(input);
+  if (forceFutureDate) {
+    userPrompt += `\n\n⚠️ TU INTENTO ANTERIOR FUE RECHAZADO: la fecha de revisión (predictionReviewDate) NO era futura válida (debía ser posterior a HOY y entre 30 y 180 días). HOY ES ${todayStr}. Recalcula predictionReviewDate como YYYY-MM-DD en el futuro correcto.`;
+  }
 
   const completion = await client.chat.completions.create({
     model: MODEL_SMART,
@@ -819,7 +852,7 @@ export async function runMetaAnalysisLLM(input: RunMetaInput): Promise<MetaAnaly
     max_tokens: 12000,
     response_format: { type: "json_object" },
     messages: [
-      { role: "system", content: META_PROMPT },
+      { role: "system", content: systemPrompt },
       { role: "user", content: userPrompt },
     ],
   });
@@ -836,19 +869,49 @@ export async function runMetaAnalysisLLM(input: RunMetaInput): Promise<MetaAnaly
   }
 
   const obj = (parsed ?? {}) as Record<string, unknown>;
-
-  const required: (keyof MetaAnalysisResult)[] = [
-    "systemReading",
-    "blocFormation",
-    "crossPatterns",
-    "contradictions",
-    "prediction",
-    "verdict",
-  ];
-  const missing = required.filter((k) => !(k in obj));
+  const missing = META_REQUIRED_KEYS.filter((k) => !(k in obj));
   if (missing.length > 0) {
     throw new Error(`DeepSeek (meta) devolvió JSON incompleto. Faltan: ${missing.join(", ")}`);
   }
 
-  return obj as MetaAnalysisResult;
+  return obj;
+}
+
+/*
+ * runMetaAnalysisLLM — Llama a MODEL_SMART con el META_PROMPT para producir
+ * la lectura del tablero global.
+ *
+ * VALIDACIÓN DE LA PREDICCIÓN: predictionReviewDate debe ser futura (30-180
+ * días). Si es inválida, se reintenta UNA vez con aviso reforzado. Si el
+ * reintento también falla, se devuelve el resultado con reviewDate null
+ * (el llamador lo guarda y lo marca en el log).
+ */
+export async function runMetaAnalysisLLM(input: RunMetaInput): Promise<MetaAnalysisResult> {
+  const today = new Date();
+
+  let obj = await callMeta(input, false);
+
+  let reviewDate: string | null = typeof obj.predictionReviewDate === "string" ? obj.predictionReviewDate : null;
+  if (!isValidReviewDate(reviewDate ?? undefined, today)) {
+    console.log("   [meta] ⚠️ predictionReviewDate inválida (" + (reviewDate ?? "ausente") + ") — reintentando...");
+    obj = await callMeta(input, true);
+    reviewDate = typeof obj.predictionReviewDate === "string" ? obj.predictionReviewDate : null;
+
+    if (!isValidReviewDate(reviewDate ?? undefined, today)) {
+      console.log("   [meta] ⚠️ El reintento SIGUE con fecha inválida (" + (reviewDate ?? "ausente") + "). Guardando con reviewDate null.");
+      reviewDate = null;
+    }
+  }
+
+  return {
+    systemReading: obj.systemReading as string,
+    blocFormation: obj.blocFormation as string,
+    crossPatterns: obj.crossPatterns as string,
+    contradictions: obj.contradictions as string,
+    predictionStatement: obj.predictionStatement as string,
+    predictionCondition: obj.predictionCondition as string,
+    predictionFalsification: obj.predictionFalsification as string,
+    predictionReviewDate: reviewDate ?? null,
+    verdict: obj.verdict as string,
+  };
 }

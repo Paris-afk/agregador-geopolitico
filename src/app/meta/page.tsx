@@ -24,7 +24,10 @@ type MetaAnalysis = {
   blocFormation: string;
   crossPatterns: string;
   contradictions: string;
-  prediction: string;
+  predictionStatement: string;
+  predictionCondition: string;
+  predictionFalsification: string;
+  predictionReviewDate: string | null;
   verdict: string;
   threadIds: string;
   createdAt: string;
@@ -178,9 +181,21 @@ export default function MetaPage() {
                 <div style={{ border: "1px solid var(--line-strong)", borderLeft: "3px solid var(--accent)", padding: "26px 28px", background: "var(--page-bg)" }}>
                   <div className="flex justify-between items-center gap-3 flex-wrap">
                     <span className={`${ibmPlexMono.className}`} style={{ fontSize: 11, letterSpacing: ".2em", textTransform: "uppercase", color: "var(--accent)", fontWeight: 600 }}>◆ Predicción sistémica</span>
-                    <span className={`${ibmPlexMono.className}`} style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--faint)" }}>Pronóstico falsable</span>
+                    <span className={`${ibmPlexMono.className}`} style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--faint)" }}>
+                      Revisión: {meta.predictionReviewDate ? new Date(meta.predictionReviewDate).toLocaleDateString("es-ES", { day: "numeric", month: "long", year: "numeric" }) : "sin fecha válida"}
+                    </span>
                   </div>
-                  <p style={{ margin: "16px 0 0", fontSize: 19, lineHeight: 1.55, color: "var(--fg-strong)", fontWeight: 500, textWrap: "pretty" }}>{meta.prediction}</p>
+                  <p style={{ margin: "16px 0 0", fontSize: 19, lineHeight: 1.55, color: "var(--fg-strong)", fontWeight: 500, textWrap: "pretty" }}>{meta.predictionStatement}</p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 0, marginTop: 18, borderTop: "1px solid var(--line)", paddingTop: 14 }}>
+                    <div className="flex-1 min-w-[180px]">
+                      <div className={`${ibmPlexMono.className}`} style={{ fontSize: 9, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--faint)" }}>Condición</div>
+                      <div style={{ fontSize: 14, lineHeight: 1.5, color: "var(--fg)", marginTop: 5 }}>{meta.predictionCondition}</div>
+                    </div>
+                    <div className="flex-1 min-w-[180px]">
+                      <div className={`${ibmPlexMono.className}`} style={{ fontSize: 9, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--alarm)" }}>Se falsaría si</div>
+                      <div style={{ fontSize: 14, lineHeight: 1.5, color: "var(--fg)", marginTop: 5 }}>{meta.predictionFalsification}</div>
+                    </div>
+                  </div>
                 </div>
               </div>
 

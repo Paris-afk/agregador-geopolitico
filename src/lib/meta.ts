@@ -143,13 +143,20 @@ export async function runMetaAnalysis(): Promise<{
       blocFormation: result.blocFormation,
       crossPatterns: result.crossPatterns,
       contradictions: result.contradictions,
-      prediction: result.prediction,
+      predictionStatement: result.predictionStatement,
+      predictionCondition: result.predictionCondition,
+      predictionFalsification: result.predictionFalsification,
+      predictionReviewDate: result.predictionReviewDate,
       verdict: result.verdict,
       threadIds: JSON.stringify(ids),
       createdAt: now,
     })
     .returning({ id: metaAnalyses.id })
     .get();
+
+  if (!result.predictionReviewDate) {
+    console.log("   ⚠️ predictionReviewDate null — la predicción no tiene fecha de revisión válida (no verificable).");
+  }
 
   console.log(`\n✅ META-ANÁLISIS COMPLETADO — id ${inserted.id}`);
   console.log(`   Veredicto: ${result.verdict.slice(0, 120)}`);
