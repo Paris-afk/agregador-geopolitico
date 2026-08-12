@@ -128,7 +128,7 @@ async function main() {
         if (idx >= pending.length) break;
 
         const a = pending[idx];
-        const realUrl = await resolveRealUrl(a.url, a.resolvedUrl);
+        const { url: realUrl } = await resolveRealUrl(a.url, a.resolvedUrl);
         const result = realUrl ? await fetchPageOgImage(realUrl) : null;
 
         if (result) {
@@ -142,9 +142,13 @@ async function main() {
             .run();
           reExtracted++;
         } else {
+          /*
+           * Solo guardamos resolvedUrl si es genuinamente no-Google.
+           */
+          const safeResolved = realUrl && !realUrl.includes("news.google.com") ? realUrl : null;
           db.update(articles)
             .set({
-              ...(realUrl ? { resolvedUrl: realUrl } : {}),
+              ...(safeResolved ? { resolvedUrl: safeResolved } : {}),
               imageFetchedAt: now,
             })
             .where(eq(articles.id, a.id))

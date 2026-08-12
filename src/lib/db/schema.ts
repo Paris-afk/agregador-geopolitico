@@ -88,6 +88,8 @@ export const articles = sqliteTable("articles", {
   imageUrl: text("image_url"),
   resolvedUrl: text("resolved_url"),
   imageFetchedAt: text("image_fetched_at"),
+  fullText: text("full_text"),
+  fullTextFetchedAt: text("full_text_fetched_at"),
 });
 
 /*

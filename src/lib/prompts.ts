@@ -17,7 +17,11 @@
 
 export const SYSTEM_PROMPT = `Eres un analista geopolítico de élite con décadas de experiencia en inteligencia estratégica. Tu método de trabajo es riguroso, cínico y basado exclusivamente en hechos verificables. Trabajas para un think tank independiente. Tu análisis será leído por tomadores de decisiones.
 
-IDIOMA: Todos los artículos que recibirás pueden estar en griego, turco, chino, ruso, inglés u otros idiomas. TÚ DEBES ESCRIBIR TODO EL ANÁLISIS EXCLUSIVAMENTE EN ESPAÑOL. Nunca respondas en otro idioma.
+REGLAS DE IDIOMA (OBLIGATORIAS, SIN EXCEPCIÓN):
+- Los artículos que recibirás pueden estar en griego, turco, chino, ruso, inglés, alemán o cualquier otro idioma.
+- INDEPENDIENTEMENTE del idioma de las fuentes, TODOS los campos de tu respuesta JSON (summary, cuiBono, saidVsDone, deviation, prediction, verdict, newState) deben estar redactados en ESPAÑOL.
+- NUNCA respondas en el idioma de los artículos. Si los artículos están en chino, escribes en español. Si están en ruso, escribes en español. Siempre español.
+- Un análisis en el idioma de las fuentes se considera UN ERROR y será descartado. Tu respuesta debe ser legible para un lector hispanohablante.
 
 MÉTODO DE ANÁLISIS (7 PASOS):
 
@@ -79,23 +83,95 @@ Responde ÚNICA Y EXCLUSIVAMENTE con un objeto JSON válido. No incluyas markdow
  *   - articles: serializados como JSON para que DeepSeek los reciba
  *     estructurados con sourceName, bias, title y content.
  */
+/*
+ * sanitizeForPrompt — Sanea texto (especialmente fullText scrapeado de webs)
+ * antes de inyectarlo en el prompt. El texto extraído puede traer:
+ *   - Caracteres de control invisibles (\u0000-\u001F) que rompen el JSON.
+ *   - Secuencias de escape problemáticas.
+ *   - Saltos de línea desordenados.
+ *
+ * Esto previene "DeepSeek no devolvió JSON válido" causado por basura
+ * invisible en el input que contamina la respuesta del modelo.
+ */
+export function sanitizeForPrompt(text: string): string {
+  return text
+    // Caracteres de control (excepto \n y \t que son legítimos)
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, " ")
+    // Normalizar secuencias de nueva línea a \n
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    // Colapsar 3+ saltos de línea a 2 (evita bloques enormes en blanco)
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function buildUserPrompt(input: {
   threadTitle: string;
   threadState: string | null;
-  articles: Array<{ sourceName: string; bias: string; title: string; content: string }>;
+  articles: Array<{
+    sourceName: string;
+    bias: string;
+    title: string;
+    content: string;
+    hasFullText?: boolean;
+  }>;
 }): string {
   const memorySection = input.threadState
-    ? `CONTEXTO PREVIO (MEMORIA DEL HILO):\n${input.threadState}\n\nCompara los artículos nuevos con esta trayectoria. Detecta si algún actor ha cambiado su comportamiento respecto al patrón anterior.`
+    ? `CONTEXTO PREVIO (MEMORIA DEL HILO):\n${sanitizeForPrompt(input.threadState)}\n\nCompara los artículos nuevos con esta trayectoria. Detecta si algún actor ha cambiado su comportamiento respecto al patrón anterior.`
     : "No hay análisis previo de este hilo. Este es el primer análisis.";
+
+  /*
+   * Renderizamos cada artículo con su marcador de evidencia:
+   *   [TEXTO COMPLETO] — tenemos el cuerpo entero, puedes citar detalles.
+   *   [TITULAR Y RESUMEN] — solo titular + snippet; sé prudente, no cites
+   *   detalles que no estén en el snippet.
+   */
+  const articlesBlock = input.articles
+    .map((a) => {
+      const marker = a.hasFullText ? "TEXTO COMPLETO" : "TITULAR Y RESUMEN";
+      return `- [${marker}] (fuente: ${a.sourceName}, bias: ${a.bias})\n  Titular: ${a.title}\n  Contenido: ${sanitizeForPrompt(a.content)}`;
+    })
+    .join("\n\n");
 
   return `HILO GEOPOLÍTICO: ${input.threadTitle}
 
 ${memorySection}
 
 ARTÍCULOS A ANALIZAR:
-${JSON.stringify(input.articles, null, 2)}
+${articlesBlock}
 
-Aplica el método de 7 pasos. Responde EXCLUSIVAMENTE con el objeto JSON.`;
+Aplica el método de 7 pasos. Responde EXCLUSIVAMENTE con el objeto JSON.
+
+IDIOMA DE LA RESPUESTA (ÚLTIMA INSTRUCCIÓN, LA MÁS IMPORTANTE):
+Los artículos anteriores pueden estar en inglés, chino, ruso, turco, griego o cualquier idioma. INDEPENDIENTEMENTE de eso, TODOS los campos de tu respuesta JSON (summary, cuiBono, saidVsDone, deviation, prediction, verdict, newState) deben estar redactados EN ESPAÑOL. Prohibido responder en el idioma de las fuentes. Tu análisis debe ser íntegramente en español.`;
+}
+
+/*
+ * buildUserPromptRetry — Variante reforzada para el reintento tras detectar
+ * una respuesta en idioma incorrecto. Añade una instrucción de idioma mucho
+ * más contundente, porque la respuesta anterior se contaminó.
+ */
+export function buildUserPromptRetry(input: {
+  threadTitle: string;
+  threadState: string | null;
+  articles: Array<{
+    sourceName: string;
+    bias: string;
+    title: string;
+    content: string;
+    hasFullText?: boolean;
+  }>;
+}): string {
+  const base = buildUserPrompt(input);
+  return `${base}
+
+⚠️ ALERTA DE IDIOMA: Tu intento anterior fue descartado porque NO estaba en español (posiblemente se contagiaron los caracteres del idioma de las fuentes, ej. chino, ruso o griego). Eso es un ERROR GRAVE.
+
+REPITE EL ANÁLISIS COMPLETO, PERO ESTA VEZ:
+- Escribe CADA campo del JSON (summary, cuiBono, saidVsDone, deviation, prediction, verdict, newState) EXCLUSIVAMENTE en español.
+- Aunque los artículos estén en chino o ruso, tus campos van en español. No copies ni un carácter del idioma original.
+- Verifica mentalmente antes de responder: ¿cada campo está en español? Si no, corrígelo.
+- Si no puedes responder sin usar el idioma original, resume en español y di entre paréntesis "[original en X]" cuando cites algo textual.`;
 }
 
 /*

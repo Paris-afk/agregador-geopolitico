@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import {
   SYSTEM_PROMPT,
   buildUserPrompt,
+  buildUserPromptRetry,
   CLASSIFIER_PROMPT,
   buildClassifierPrompt,
   CONSOLIDATOR_PROMPT,
@@ -61,6 +62,7 @@ export type AnalysisInput = {
     bias: string;
     title: string;
     content: string;
+    hasFullText?: boolean;
   }>;
 };
 
@@ -93,14 +95,29 @@ export type AnalysisOutput = {
  *   5. response_format json_object garantiza que content sea JSON parseable.
  *   6. Validamos las 7 claves requeridas antes de devolver el resultado.
  */
-export async function analyzeThread(input: AnalysisInput): Promise<AnalysisOutput> {
-  const userPrompt = buildUserPrompt(input);
+export async function analyzeThread(
+  input: AnalysisInput,
+  opts?: { retry?: boolean }
+): Promise<AnalysisOutput> {
+  /*
+   * En el reintento usamos buildUserPromptRetry() (instrucción de idioma
+   * reforzada) porque la respuesta anterior se contaminó con el idioma
+   * de las fuentes.
+   */
+  const userPrompt = opts?.retry ? buildUserPromptRetry(input) : buildUserPrompt(input);
 
   const completion = await client.chat.completions.create({
     model: MODEL_SMART,
     reasoning_effort: "high",
     // @ts-expect-error — extra_body no está en los tipos del SDK de OpenAI
     extra_body: { thinking: { type: "enabled" } },
+    /*
+     * max_tokens: evita que la respuesta se TRUNQUE. Sin límite explícito,
+     * DeepSeek puede cortar el JSON a mitad en análisis largos (pasó con
+     * dos análisis truncados). 12000 tokens dan margen amplio para los
+     * 7 campos + newState.
+     */
+    max_tokens: 12000,
     /*
      * response_format json_object es CLAVE:
      *   - DeepSeek (como OpenAI) garantiza que el output será JSON parseable.
@@ -117,6 +134,14 @@ export async function analyzeThread(input: AnalysisInput): Promise<AnalysisOutpu
   });
 
   const raw = completion.choices[0]?.message?.content;
+  const finishReason = completion.choices[0]?.finish_reason ?? "unknown";
+
+  /*
+   * Log del finish_reason: "stop" = terminó naturalmente, "length" = se
+   * truncó por el límite de max_tokens. Es la primera señal diagnóstica
+   * cuando una respuesta sale rota.
+   */
+  console.log(`   [deepseek] finish_reason="${finishReason}" | tokens=${completion.usage?.total_tokens ?? "?"}`);
 
   if (!raw) {
     throw new Error("DeepSeek devolvió una respuesta vacía. Verifica la API key y el saldo.");
@@ -125,13 +150,46 @@ export async function analyzeThread(input: AnalysisInput): Promise<AnalysisOutpu
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
+  } catch (err) {
     /*
-     * Si el parseo falla, mostramos los primeros 300 caracteres de la
-     * respuesta para diagnosticar (ej: si devolvió markdown o HTML).
+     * Guardamos la respuesta CRUDA COMPLETA en logs/ para inspeccionarla.
+     * El error de JSON.parse lleva la posición exacta del fallo (ej:
+     * "Unexpected token } in JSON at position 2341"). Lo logueamos y
+     * también escribimos el archivo con metadatos de contexto.
      */
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`   [deepseek] JSON.parse ERROR: ${errMsg}`);
+    console.error(`   [deepseek] finish_reason="${finishReason}" | longitud=${raw.length}`);
+
+    try {
+      const fs = await import("fs");
+      const path = await import("path");
+      const logsDir = path.join(process.cwd(), "logs");
+      if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const file = path.join(logsDir, `failed-response-${input.threadTitle.replace(/[^\w-]+/g, "_").slice(0, 40)}-${ts}.json`);
+      fs.writeFileSync(
+        file,
+        JSON.stringify(
+          {
+            threadTitle: input.threadTitle,
+            finishReason,
+            tokensUsed: completion.usage?.total_tokens ?? null,
+            parseError: errMsg,
+            raw,
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+      console.error(`   [deepseek] Respuesta cruda guardada en ${file}`);
+    } catch (fileErr) {
+      console.error(`   [deepseek] No se pudo guardar la respuesta cruda: ${fileErr}`);
+    }
+
     const preview = raw.length > 300 ? raw.slice(0, 300) + "..." : raw;
-    throw new Error(`DeepSeek no devolvió JSON válido. Respuesta: ${preview}`);
+    throw new Error(`DeepSeek no devolvió JSON válido (${errMsg}). Respuesta: ${preview}`);
   }
 
   if (typeof parsed !== "object" || parsed === null) {

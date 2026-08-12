@@ -1,9 +1,53 @@
 import { db } from "./db/index";
 import { threads, articles, sources, articleThreads, analyses } from "./db/schema";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, and, isNull } from "drizzle-orm";
 import { analyzeThread } from "./deepseek";
 import type { AnalysisOutput } from "./deepseek";
 import { getThreadPerspectiveCoverage } from "./threads";
+import { extractTextsForArticles, getFullTextForArticles } from "./extract";
+
+/*
+ * hasForeignLanguageContamination — Detecta si una respuesta del analista
+ * se contaminó con el idioma de las fuentes (chino, japonés, coreano,
+ * cirílico) en proporción significativa.
+ *
+ * El modelo a veces responde en el idioma del contenido cuando hay mucho
+ * texto en chino/ruso en el contexto. Comprobamos si los campos de texto
+ * contienen rangos Unicode CJK (U+4E00–U+9FFF, U+3400–U+4DBF) o cirílico
+ * (U+0400–U+04FF) en proporción > ~8% de los caracteres — si lo supera,
+ * la respuesta no es español y debe descartarse/reintentarse.
+ */
+function hasForeignLanguageContamination(analysis: AnalysisOutput): boolean {
+  const textFields = [
+    analysis.summary,
+    analysis.cuiBono,
+    analysis.saidVsDone,
+    analysis.deviation ?? "",
+    analysis.prediction ?? "",
+    analysis.verdict,
+    analysis.newState,
+  ];
+
+  const allText = textFields.join(" ");
+  if (allText.length < 50) return false;
+
+  let foreign = 0;
+  for (const ch of allText) {
+    const code = ch.codePointAt(0);
+    if (code === undefined) continue;
+    // CJK unificado (chino/japonés/coreano)
+    if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3400 && code <= 0x4dbf)) {
+      foreign++;
+      continue;
+    }
+    // Cirílico (ruso, búlgaro, etc.)
+    if (code >= 0x0400 && code <= 0x04ff) {
+      foreign++;
+    }
+  }
+
+  return foreign / allText.length > 0.08;
+}
 
 /*
  * ============================================================================
@@ -232,10 +276,12 @@ export async function analyzeAllThreads(opts?: {
 
       const threadArticles = db
         .select({
+          id: articles.id,
           sourceName: sources.name,
           bias: sources.bias,
           title: articles.title,
           content: articles.content,
+          resolvedUrl: articles.resolvedUrl,
         })
         .from(articleThreads)
         .innerJoin(articles, eq(articleThreads.articleId, articles.id))
@@ -250,19 +296,112 @@ export async function analyzeAllThreads(opts?: {
         continue;
       }
 
+      /*
+       * SCRAPING QUIRÚRGICO (solo artículos críticos):
+       *   - Hilo con state previo: ampliamos los 2 artículos nuevos más recientes.
+       *   - Hilo SIN state (primer análisis): ampliamos máximo 3 (puede haber
+       *     25 nuevos; ampliar todos dispararía el input).
+       *   El resto entra con titular+snippet como antes.
+       */
+      const MAX_FULL_TEXT = isFirstAnalysis ? 3 : 2;
+      const criticalTargets = threadArticles
+        .filter((a) => a.resolvedUrl)
+        .slice(0, MAX_FULL_TEXT)
+        .map((a) => ({ id: a.id, resolvedUrl: a.resolvedUrl }));
+
+      const { expanded, extraChars } = await extractTextsForArticles(criticalTargets);
+      const fullTexts = getFullTextForArticles(criticalTargets.map((t) => t.id));
+
+      /*
+       * Construir el input del analista:
+       *   - Los que tienen fullText van como TEXTO COMPLETO (hasFullText).
+       *   - Los demás como TITULAR Y RESUMEN (snippet).
+       */
+      const analystArticles = threadArticles.map((a) => {
+        const ft = fullTexts.get(a.id);
+        return {
+          sourceName: a.sourceName,
+          bias: a.bias,
+          title: a.title,
+          content: ft ?? a.content,
+          hasFullText: !!ft,
+        };
+      });
+
       const stateLabel = !isFirstAnalysis ? "+ state" : "sin state previo";
       console.log(
-        `${label} Enviando al analista: ${threadArticles.length} artículos nuevos ${stateLabel}`
+        `${label} Enviando al analista: ${threadArticles.length} artículos nuevos ${stateLabel} (${expanded} con texto completo, +${extraChars.toLocaleString()} caracteres)`
       );
 
       /*
-       * Llamar al analista (Pro + thinking, MODEL_SMART).
+       * Llamar al analista (Pro + thinking, MODEL_SMART) con DEGRADACIÓN.
+       *
+       * Escalera de reintentos (máximo 2 llamadas extra):
+       *   1. Intento completo (fullText donde haya).
+       *   2. Si JSON inválido O idioma incorrecto → reintento SIN texto
+       *      completo (solo titulares + snippet + state). El texto scrapeado
+       *      de TASS/RT puede contaminar la respuesta; quitarlo a menudo lo
+       *      arregla. Mejor un análisis sin profundidad que ninguno.
+       *   3. (El idioma ya se maneja con buildUserPromptRetry en el intento 2.)
        */
-      const analysis: AnalysisOutput = await analyzeThread({
-        threadTitle: thread.title,
-        threadState: thread.state ?? null,
-        articles: threadArticles,
-      });
+      let analysis: AnalysisOutput | null = null;
+
+      // artículos degradados: sin fullText, solo snippet (más corto)
+      const degradedArticles = analystArticles.map((a) => ({
+        sourceName: a.sourceName,
+        bias: a.bias,
+        title: a.title,
+        content: a.content,
+        hasFullText: false, // aunque haya fullText, no lo enviamos en degradado
+      }));
+
+      // Intento 1: completo
+      try {
+        analysis = await analyzeThread({
+          threadTitle: thread.title,
+          threadState: thread.state ?? null,
+          articles: analystArticles,
+        });
+
+        if (hasForeignLanguageContamination(analysis)) {
+          console.log(`⚠️ ${label} RESPUESTA EN IDIOMA INCORRECTO — reintentando en modo degradado...`);
+          analysis = await analyzeThread(
+            {
+              threadTitle: thread.title,
+              threadState: thread.state ?? null,
+              articles: degradedArticles,
+            },
+            { retry: true }
+          );
+          if (analysis && hasForeignLanguageContamination(analysis)) {
+            console.log(`❌ ${label} El reintento SIGUE en idioma incorrecto. Descartando (sin guardar).`);
+            throw new Error("Respuesta en idioma incorrecto tras reintento — análisis descartado");
+          }
+        }
+      } catch (err) {
+        // JSON inválido u otro fallo → DEGRADADO: sin fullText, una sola vez
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(`⚠️ ${label} Fallo en intento completo ("${msg.slice(0, 80)}") — reintentando en modo degradado (sin texto completo)...`);
+        try {
+          analysis = await analyzeThread({
+            threadTitle: thread.title,
+            threadState: thread.state ?? null,
+            articles: degradedArticles,
+          });
+          if (analysis && hasForeignLanguageContamination(analysis)) {
+            console.log(`❌ ${label} Degradado en idioma incorrecto. Descartando.`);
+            throw new Error("Análisis degradado en idioma incorrecto — descartado");
+          }
+        } catch (degradedErr) {
+          const dMsg = degradedErr instanceof Error ? degradedErr.message : String(degradedErr);
+          console.error(`❌ ${label} El reintento degradado TAMBIÉN falló: ${dMsg}`);
+          throw degradedErr;
+        }
+      }
+
+      if (!analysis) {
+        throw new Error("Análisis nulo — descartado");
+      }
 
       const now = new Date().toISOString();
 

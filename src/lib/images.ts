@@ -1,5 +1,5 @@
 import { db } from "./db/index";
-import { articles } from "./db/schema";
+import { articles, sources } from "./db/schema";
 import { eq, and, isNull, isNotNull, sql } from "drizzle-orm";
 
 /*
@@ -11,34 +11,34 @@ import { eq, and, isNull, isNotNull, sql } from "drizzle-orm";
  *
  * NIVEL 1 (gratis, sin red extra) — lo hace rss.ts durante la ingesta:
  *   Muchos feeds RSS ya traen la imagen en <enclosure>, <media:content> o
- *   <media:thumbnail>. rss.ts los captura con customFields de rss-parser y
- *   los guarda directamente en imageUrl. Sin peticiones adicionales.
+ *   <media:thumbnail>. rss.ts los captura con customFields y los guarda
+ *   directamente en imageUrl. Sin peticiones adicionales.
  *
  * NIVEL 2 (fetch de la página) — este módulo:
  *   Si el feed no trajo imagen, descargamos la página del artículo y
  *   extraemos el meta tag og:image (con twitter:image como alternativa).
- *   Guardamos la URL real resuelta en resolvedUrl.
  *
- * PROBLEMA RESUELTO (ARREGLO 2): Google News (4 de 6 fuentes) NO redirige
- * por HTTP sino por JavaScript. fetch + redirect:"follow" se quedaba en la
- * página intermedia de Google y extraía su og:image (el logo). Ahora:
- *   a) rss.ts ya captura la URL real de description/guid/source (gratis).
- *   b) Si no la hay, intentamos decodificar la URL base64 de
- *      news.google.com/rss/articles/CBMi... para extraer la URL original.
- *   c) Como último recurso, descargamos la página de Google News y buscamos
- *      el enlace de salida al artículo real.
- *   Guardamos la URL real en resolvedUrl y usamos ESA para og:image.
+ * DIAGNÓSTICO DE BUGS (corrida 20:04 y 20:53):
  *
- * FILTRO DE IMÁGENES BASURA (ARREGLO 1): descartamos imágenes que no son
- * del artículo: dominio google, logos, placeholders, icons, o <400px.
- * Es mejor NO tener imagen que un logo de Google repetido en cada tarjeta.
+ * BUG 1 — Falso positivo de resolución:
+ *   fetchGoogleNewsOutbound() devolvía la URL de Google News (el data-attr
+ *   data-n-au es relativo y resuelve a news.google.com), y resolveRealUrl()
+ *   la retornaba sin comprobación final. Además, el worker guardaba
+ *   resolvedUrl = realUrl aunque fuera de Google (el filtro bloqueaba el
+ *   logo de la imagen, pero la URL envenenada se escribía igual).
+ *   FIX: resolveRealUrl() y fetchGoogleNewsOutbound() NUNCA devuelven una
+ *   URL de news.google.com. El worker solo guarda resolvedUrl si la URL
+ *   real es genuinamente no-Google. El contador refleja la realidad.
  *
- * ROBUSTEZ (corre cada noche sobre ~175 artículos):
- *   - Timeout de 8s por petición.
- *   - Concurrencia limitada a 5 peticiones paralelas (worker pool).
- *   - Best-effort: si un artículo falla, se deja imageUrl=null y se marca
- *     imageFetchedAt para no reintentarlo infinitamente.
- *   - Un fallo de imagen NUNCA rompe la ingesta.
+ * BUG 2 — Fase de 0,4s sin peticiones:
+ *   Google devolvió 429/403 al instante (rate-limit tras las ~300 peticiones
+ *   de clean-images), así que fetchGoogleNewsOutbound() fallaba rápido y
+ *   devolvía null. Se marcaba imageFetchedAt sin resolver nada.
+ *   FIX: logging por artículo con el código HTTP exacto para detectar
+ *   rate-limiting frente a errores de código.
+ *
+ * REGLA DE ORO: es preferible NO tener imagen a guardar un logo de Google
+ * o una URL envenenada. No queremos más "éxitos" que no lo son.
  */
 
 const TIMEOUT_MS = 8_000;
@@ -56,12 +56,13 @@ export function isGoogleNewsUrl(u: string): boolean {
 }
 
 /*
- * decodeGoogleNewsUrl — Estrategia (b): decodifica el identificador base64
- * de una URL news.google.com/rss/articles/CBMi... para extraer la URL real.
+ * decodeGoogleNewsUrl — Intenta decodificar el identificador base64 de una
+ * URL news.google.com/rss/articles/CBMi... para extraer la URL original.
  *
- * El segmento tras /articles/ es base64 de un protobuf que contiene la URL
- * original del artículo. Lo decodificamos a bytes y buscamos una cadena
- * "http(s)://" válida dentro del payload.
+ * OJO (diag): en el formato actual de Google News, el payload decodificado
+ * NO contiene "http" en claro (verificado: 175 bytes sin "http"). Esta
+ * estrategia suele fallar con el formato nuevo. Se intenta pero no se
+ * asume éxito.
  */
 function decodeGoogleNewsUrl(url: string): string | null {
   const m = url.match(/\/articles\/([A-Za-z0-9_-]+)/);
@@ -77,7 +78,6 @@ function decodeGoogleNewsUrl(url: string): string | null {
     return null;
   }
 
-  // Buscar "http" en los bytes y leer hasta un carácter no-URL.
   const text = Buffer.from(bytes).toString("latin1");
   const start = text.indexOf("http");
   if (start === -1) return null;
@@ -94,11 +94,12 @@ function decodeGoogleNewsUrl(url: string): string | null {
  * fetchGoogleNewsOutbound — Estrategia (c): descarga la página intermedia
  * de Google News y extrae el enlace de salida al artículo real.
  *
- * La página suele incluir un <a href="https://real..." ...> de salida o un
- * data-attribute con el destino. Buscamos el primer <a href="http..."> que
- * NO sea de Google.
+ * Devuelve { url, httpStatus } para logging. NUNCA devuelve una URL de
+ * news.google.com: si el data-attr resuelve a Google, se descarta.
  */
-async function fetchGoogleNewsOutbound(googleUrl: string): Promise<string | null> {
+async function fetchGoogleNewsOutbound(
+  googleUrl: string
+): Promise<{ url: string | null; httpStatus: number | null }> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -111,55 +112,98 @@ async function fetchGoogleNewsOutbound(googleUrl: string): Promise<string | null
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
       },
     });
-    if (!res.ok) return null;
+
+    if (!res.ok) {
+      // Ej: 429 Too Many Requests (rate-limit), 403 Forbidden
+      return { url: null, httpStatus: res.status };
+    }
 
     const html = await res.text();
 
     // <a href="https://real...">
     const anchor = html.match(/<a[^>]+href=["'](https?:\/\/[^"']+)["'][^>]*>/i);
-    if (anchor?.[1] && !isGoogleNewsUrl(anchor[1])) return anchor[1];
+    if (anchor?.[1] && !isGoogleNewsUrl(anchor[1])) {
+      return { url: anchor[1], httpStatus: res.status };
+    }
 
-    // data-attributes de salida (data-n-au, data-ct-url, etc.)
-    const dataAttr =
-      html.match(/data-(?:n-au|ct-url|url)=["'](https?:\/\/[^"']+)["']/i)?.[1] ??
-      html.match(/data-(?:n-au|ct-url|url)=["'](\/[^"']+)["']/i)?.[1];
+    // data-attributes de salida — OJO: suelen ser RELATIVOS (resuelven a
+    // news.google.com). Solo los aceptamos si el resultado NO es Google.
+    const dataAttr = html.match(/data-(?:n-au|ct-url|url)=["']([^"']+)["']/i)?.[1];
     if (dataAttr) {
       try {
-        return new URL(dataAttr, googleUrl).toString();
+        const absolute = new URL(dataAttr, googleUrl).toString();
+        if (!isGoogleNewsUrl(absolute)) return { url: absolute, httpStatus: res.status };
       } catch {
-        return null;
+        return { url: null, httpStatus: res.status };
       }
     }
 
-    return null;
+    return { url: null, httpStatus: res.status };
   } catch {
-    return null;
+    // Timeout (AbortError) u error de red — res no disponible
+    return { url: null, httpStatus: null };
   } finally {
     clearTimeout(timeoutId);
   }
 }
 
 /*
- * resolveRealUrl — Devuelve la URL real del artículo a partir de la URL
- * de Google News. Orden:
+ * resolveRealUrl — Devuelve la URL real del artículo a partir de la URL de
+ * Google News, con un trace de qué se intentó (para logging honesto).
+ *
+ * Orden:
  *   a) resolvedUrl ya conocida (del feed, capturada por rss.ts).
- *   b) decodificar el base64 de la URL de Google News.
- *   c) descargar la página intermedia y buscar el enlace de salida.
- * Devuelve null si no se pudo resolver.
+ *   b) Si la URL no es Google, es la URL real directamente.
+ *   c) Decodificar el base64 de la URL de Google News.
+ *   d) Descargar la página intermedia y buscar el enlace de salida.
+ *
+ * REGLA DURA: el resultado NUNCA puede ser una URL de news.google.com.
+ * Si tras todas las estrategias sigue siendo Google o no hay resultado,
+ * devuelve { url: null, ... } — se cuenta como SIN RESOLVER.
  */
-export async function resolveRealUrl(articleUrl: string, knownResolved: string | null): Promise<string | null> {
+export async function resolveRealUrl(
+  articleUrl: string,
+  knownResolved: string | null
+): Promise<{ url: string | null; trace: string[]; httpStatus: number | null }> {
+  const trace: string[] = [];
+
   // a) Ya resuelta (gratis, capturada en ingesta)
-  if (knownResolved && !isGoogleNewsUrl(knownResolved)) return knownResolved;
+  if (knownResolved) {
+    if (isGoogleNewsUrl(knownResolved)) {
+      trace.push("knownResolved=DESCARTADA(es Google)");
+    } else {
+      trace.push("knownResolved=usada");
+      return { url: knownResolved, trace, httpStatus: null };
+    }
+  } else {
+    trace.push("knownResolved=null");
+  }
 
-  // Si la URL no es de Google News, es la URL real directamente
-  if (!isGoogleNewsUrl(articleUrl)) return articleUrl;
+  // b) URL no-Google = directa
+  if (!isGoogleNewsUrl(articleUrl)) {
+    trace.push("url=directa(no Google)");
+    return { url: articleUrl, trace, httpStatus: null };
+  }
+  trace.push("url=Google News");
 
-  // b) Decodificar el identificador base64
+  // c) Decodificar base64
   const decoded = decodeGoogleNewsUrl(articleUrl);
-  if (decoded) return decoded;
+  if (decoded) {
+    trace.push("decode=OK");
+    return { url: decoded, trace, httpStatus: null };
+  }
+  trace.push("decode=sin-URL-en-payload");
 
-  // c) Descargar la página intermedia y buscar el enlace de salida
-  return fetchGoogleNewsOutbound(articleUrl);
+  // d) Descargar página intermedia
+  trace.push("fetch-page=...");
+  const outbound = await fetchGoogleNewsOutbound(articleUrl);
+  if (outbound.url) {
+    trace.push(`fetch-page=OK(http ${outbound.httpStatus})`);
+    return { url: outbound.url, trace, httpStatus: outbound.httpStatus };
+  }
+  trace.push(`fetch-page=sin-salida(http ${outbound.httpStatus ?? "n/a"})`);
+
+  return { url: null, trace, httpStatus: outbound.httpStatus };
 }
 
 /*
@@ -167,7 +211,6 @@ export async function resolveRealUrl(articleUrl: string, knownResolved: string |
  * artículo (logos, placeholders, favicons, dominios de Google).
  */
 export function isGarbageImage(imageUrl: string, ogWidth: number | null): boolean {
-  // Imágenes demasiado pequeñas (menos de 400px) suelen ser logos/icons
   if (ogWidth !== null && ogWidth < MIN_IMAGE_WIDTH) return true;
 
   try {
@@ -175,12 +218,9 @@ export function isGarbageImage(imageUrl: string, ogWidth: number | null): boolea
     const host = u.hostname.toLowerCase();
     const path = u.pathname.toLowerCase();
 
-    // Dominios de Google (logos, assets estáticos)
     if (host === "google.com" || host.endsWith(".google.com")) return true;
     if (host === "gstatic.com" || host.endsWith(".gstatic.com")) return true;
     if (host === "googleusercontent.com" || host.endsWith(".googleusercontent.com")) return true;
-
-    // Patrones de logo/placeholder en la ruta
     if (/(logo|default|placeholder|fallback|icon|favicon|spinner|loader)/.test(path)) return true;
   } catch {
     return false;
@@ -190,12 +230,15 @@ export function isGarbageImage(imageUrl: string, ogWidth: number | null): boolea
 }
 
 /*
- * fetchPageOgImage — Descarga la página de un artículo y extrae la imagen
- * Open Graph. Aplica el filtro de imágenes basura.
+ * fetchPageOgImage — Descarga la página del artículo (URL real) y extrae
+ * la imagen Open Graph. Aplica el filtro de imágenes basura.
  *
- * Returns: { image, resolvedUrl } o null si no hay imagen / falla / es basura.
+ * Devuelve { image, resolvedUrl } o null si no hay imagen / falla / basura.
+ * El status HTTP se devuelve en el objeto de éxito para logging.
  */
-export async function fetchPageOgImage(url: string): Promise<{ image: string; resolvedUrl: string } | null> {
+export async function fetchPageOgImage(
+  url: string
+): Promise<{ image: string; resolvedUrl: string; httpStatus: number | null } | null> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
@@ -216,7 +259,6 @@ export async function fetchPageOgImage(url: string): Promise<{ image: string; re
     const html = await res.text();
     if (html.length < 200) return null;
 
-    // Extraer og:image / twitter:image
     const patterns = [
       /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i,
       /<meta[^>]+property=["']og:image:url["'][^>]+content=["']([^"']+)["']/i,
@@ -234,11 +276,9 @@ export async function fetchPageOgImage(url: string): Promise<{ image: string; re
 
     if (!image) return null;
 
-    // Ancho declarado (og:image:width) para descartar logos/icons
     const widthMatch = html.match(/<meta[^>]+property=["']og:image:width["'][^>]+content=["'](\d+)["']/i);
     const ogWidth = widthMatch ? parseInt(widthMatch[1], 10) : null;
 
-    // Normalizar a absoluta
     let absolute: string;
     try {
       absolute = new URL(image, resolvedUrl).toString();
@@ -246,10 +286,9 @@ export async function fetchPageOgImage(url: string): Promise<{ image: string; re
       return null;
     }
 
-    // FILTRO DE BASURA: si es un logo/placeholder/google, descartar
     if (isGarbageImage(absolute, ogWidth)) return null;
 
-    return { image: absolute, resolvedUrl };
+    return { image: absolute, resolvedUrl, httpStatus: res.status };
   } catch {
     return null;
   } finally {
@@ -261,17 +300,14 @@ export async function fetchPageOgImage(url: string): Promise<{ image: string; re
  * extractImagesForArticles — Procesa las imágenes de los artículos nuevos
  * de una corrida de ingesta.
  *
- * since: timestamp ISO del inicio de la corrida. Solo se consideran
- *   artículos con fetchedAt >= since (los nuevos de esta ejecución).
+ * Logging HONESTO por artículo:
+ *   - URL original y fuente (sourceName)
+ *   - Qué estrategia se intentó y resultado de cada una (trace)
+ *   - Código HTTP exacto en fallos de red (429/403/etc.)
+ *   - Si se salta sin intentar: por qué (sin resolvedUrl, o ya intentado)
  *
- * Flujo:
- *   1. Cuenta cuántos artículos nuevos ya tienen imagen del feed (NIVEL 1).
- *   2. De los que NO tienen imagen (ni intento previo), resuelve la URL real
- *      (Google News) y ejecuta NIVEL 2.
- *   3. Marca imageFetchedAt en todos los intentados para no reintentar.
- *
- * Returns: { fromFeed, fromPage, failed, googleResolved, googleUnresolved }
- *   para el log del pipeline.
+ * Contadores que reflejan la realidad: googleResolved solo cuenta si la
+ * URL real es genuinamente no-Google. Nunca cuenta un logo envenenado.
  */
 export async function extractImagesForArticles(since: string): Promise<{
   fromFeed: number;
@@ -291,12 +327,17 @@ export async function extractImagesForArticles(since: string): Promise<{
   )?.count ?? 0;
 
   /*
-   * Artículos nuevos que necesitan NIVEL 2 (incluye resolvedUrl para
-   * saber si ya tenemos la URL real del feed).
+   * Artículos que necesitan NIVEL 2, con sourceName para logging.
    */
   const pending = db
-    .select({ id: articles.id, url: articles.url, resolvedUrl: articles.resolvedUrl })
+    .select({
+      id: articles.id,
+      url: articles.url,
+      resolvedUrl: articles.resolvedUrl,
+      sourceName: sources.name,
+    })
     .from(articles)
+    .innerJoin(sources, eq(articles.sourceId, sources.id))
     .where(
       and(
         sql`${articles.fetchedAt} >= ${since}`,
@@ -306,6 +347,10 @@ export async function extractImagesForArticles(since: string): Promise<{
     )
     .limit(150)
     .all();
+
+  if (pending.length > 0) {
+    console.log(`   Procesando ${pending.length} artículos para imágenes (fase 1b)...`);
+  }
 
   let fromPage = 0;
   let failed = 0;
@@ -323,13 +368,26 @@ export async function extractImagesForArticles(since: string): Promise<{
       const isGoogle = isGoogleNewsUrl(article.url);
 
       /*
-       * Resolver la URL real si es Google News (o ya la tenemos del feed).
+       * Resolver la URL real (nunca devuelve Google; puede devolver null).
        */
-      const realUrl = await resolveRealUrl(article.url, article.resolvedUrl);
+      const res = await resolveRealUrl(article.url, article.resolvedUrl);
+      const realUrl = res.url;
 
       if (isGoogle) {
-        if (realUrl && !isGoogleNewsUrl(realUrl)) googleResolved++;
+        if (realUrl) googleResolved++;
         else googleUnresolved++;
+      }
+
+      /*
+       * LOG HONESTO por artículo.
+       */
+      const sourceTag = `[${article.sourceName}]`;
+      if (isGoogle) {
+        console.log(
+          `      ${sourceTag} id=${article.id} Google: ${res.trace.join(" → ")} ${realUrl ? "→ RESUELTO" : "→ SIN RESOLVER"}`
+        );
+      } else if (!realUrl) {
+        console.log(`      ${sourceTag} id=${article.id} directo sin resolvedUrl → sin intento`);
       }
 
       const result = realUrl ? await fetchPageOgImage(realUrl) : null;
@@ -346,12 +404,13 @@ export async function extractImagesForArticles(since: string): Promise<{
         fromPage++;
       } else {
         /*
-         * Fallo o sin imagen. Si resolvimos la URL real, la guardamos igual
-         * (beneficia al futuro scraping de texto completo). imageUrl queda null.
+         * Fallo o sin imagen. SOLO guardamos resolvedUrl si la URL real es
+         * genuinamente no-Google (nunca una URL envenenada). imageUrl null.
          */
+        const safeResolved = realUrl && !isGoogleNewsUrl(realUrl) ? realUrl : null;
         db.update(articles)
           .set({
-            ...(realUrl ? { resolvedUrl: realUrl } : {}),
+            ...(safeResolved ? { resolvedUrl: safeResolved } : {}),
             imageFetchedAt: now,
           })
           .where(eq(articles.id, article.id))
