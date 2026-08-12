@@ -208,6 +208,16 @@ export async function analyzeAllThreads(opts?: {
 
   let analyzed = 0;
   let failed = 0;
+  // Desglose del abogado del diablo (para medir si el refutador es útil)
+  let redTeamSostiene = 0;
+  let redTeamDebilita = 0;
+  let redTeamRefuta = 0;
+  // Predicciones que pasaron por refutación vs. saltadas (corroboradas)
+  let redTeamEvaluated = 0;
+  let redTeamSkipped = 0;
+  let redTeamSkipBySource = 0;
+  let redTeamSkipByPerspectives = 0;
+  let redTeamSkipByInertia = 0;
 
   /*
    * for simple sobre lista fija. No hay while, no hay re-consulta a BD.
@@ -408,7 +418,8 @@ export async function analyzeAllThreads(opts?: {
       /*
        * Guardar el análisis en la tabla analyses.
        */
-      db.insert(analyses)
+      const insertedAnalysis = db
+        .insert(analyses)
         .values({
           threadId: thread.id,
           summary: analysis.summary,
@@ -416,11 +427,159 @@ export async function analyzeAllThreads(opts?: {
           saidVsDone: analysis.saidVsDone,
           deviation: analysis.deviation,
           prediction: analysis.prediction,
+          predictionStatement: analysis.predictionStatement ?? null,
+          predictionCondition: analysis.predictionCondition ?? null,
+          predictionFalsification: analysis.predictionFalsification ?? null,
+          predictionReviewDate: analysis.predictionReviewDate ?? null,
           verdict: analysis.verdict,
           analysisDate: now,
           createdAt: now,
         })
-        .run();
+        .returning({ id: analyses.id })
+        .get();
+
+      /*
+       * CONTRA-DEBATE ANTES DE PREDECIR (PASO 2 y 3):
+       *   - verifyPredictionFacts: corrobora las afirmaciones en la BD.
+       *   - runRedTeam: el abogado del diablo intenta destruir la predicción.
+       * Resolución:
+       *   - 'sostiene' → se registra tal cual, confidence alta.
+       *   - 'debilita' → se registra la versión revisada, confidence media.
+       *   - 'refuta'   → NO se registra predicción (mejor ninguna que mala).
+       * Los campos rebuttal/alternativeHypothesis/verdict se guardan en analyses.
+       */
+      let predictionToRegister: {
+        statement: string;
+        condition: string | null;
+        falsification: string | null;
+        reviewDate: string | null;
+        confidence: "alta" | "media" | "baja";
+        rebuttal: string;
+      } | null = null;
+
+      if (insertedAnalysis && analysis.predictionStatement) {
+        try {
+          const { verifyPredictionFacts, getContextThreadIds } = await import("./verify");
+          const { runRedTeam } = await import("./redteam");
+
+          const contextThreadIds = getContextThreadIds(thread.id);
+          const verification = verifyPredictionFacts({
+            statement: analysis.predictionStatement,
+            summary: analysis.summary,
+            threadId: thread.id,
+            contextThreadIds,
+          });
+
+          /*
+           * FILTRO CONDICIONAL del red-team:
+           * Solo se ejecuta si la predicción es RIESGOSA:
+           *   1. El hecho que la sustenta aparece en 1 sola perspectiva
+           *      (según verify.ts) → fuente única sin corroborar.
+           *   2. El teatro tiene menos de 3 perspectivas distintas.
+           *   3. La predicción va contra la inercia (againstInertia).
+           * Si NINGUNA se cumple (corroborada por 3+ perspectivas y
+           * continuista), se salta el red-team y se registra con confidence
+           * alta directamente.
+           */
+          const theaterPerspectives = thread.coverage.perspectives.length;
+          const singleSource = verification.isSingleSource;
+          const againstInertia = analysis.againstInertia === true;
+          const shouldRedTeam = singleSource || theaterPerspectives < 3 || againstInertia;
+
+          if (!shouldRedTeam) {
+            redTeamSkipped++;
+            // registrar directamente con confidence alta, sin refutación
+            predictionToRegister = {
+              statement: analysis.predictionStatement,
+              condition: analysis.predictionCondition ?? null,
+              falsification: analysis.predictionFalsification ?? null,
+              reviewDate: analysis.predictionReviewDate ?? null,
+              confidence: "alta",
+              rebuttal: "",
+            };
+            console.log(`      ✓ Predicción corroborada (${theaterPerspectives} perspectivas, continuista) — red-team saltado.`);
+          } else {
+            redTeamEvaluated++;
+            const reasons: string[] = [];
+            if (singleSource) { redTeamSkipBySource++; reasons.push("fuente única"); }
+            if (theaterPerspectives < 3) { redTeamSkipByPerspectives++; reasons.push("<3 perspectivas"); }
+            if (againstInertia) { redTeamSkipByInertia++; reasons.push("contra inercia"); }
+            console.log(`      ⚖️ Red-team disparado (${reasons.join(", ")})`);
+
+            const redTeam = await runRedTeam({
+              statement: analysis.predictionStatement,
+              reasoning: `${analysis.summary}\n\nCui bono: ${analysis.cuiBono}\nVeredicto: ${analysis.verdict}`,
+              verification: verification.total,
+              context: `${thread.state ?? "(sin state)"}\nTeatros conectados: ${contextThreadIds.join(", ") || "ninguno"}`,
+            });
+
+            // Guardar el contra-argumento en el análisis
+            db.update(analyses)
+              .set({
+                rebuttal: redTeam.rebuttal,
+                alternativeHypothesis: redTeam.alternativeHypothesis,
+                rebuttalVerdict: redTeam.verdict,
+              })
+              .where(eq(analyses.id, insertedAnalysis.id))
+              .run();
+
+            console.log(`      ⚖️ Red-team "${thread.title}": ${redTeam.verdict}`);
+
+            if (redTeam.verdict === "sostiene") {
+              redTeamSostiene++;
+              predictionToRegister = {
+                statement: analysis.predictionStatement,
+                condition: analysis.predictionCondition ?? null,
+                falsification: analysis.predictionFalsification ?? null,
+                reviewDate: analysis.predictionReviewDate ?? null,
+                confidence: "alta",
+                rebuttal: redTeam.rebuttal,
+              };
+            } else if (redTeam.verdict === "debilita") {
+              redTeamDebilita++;
+              const revised = redTeam.suggestedRevision?.trim();
+              predictionToRegister = {
+                statement: revised || analysis.predictionStatement,
+                condition: analysis.predictionCondition ?? null,
+                falsification: analysis.predictionFalsification ?? null,
+                reviewDate: analysis.predictionReviewDate ?? null,
+                confidence: "media",
+                rebuttal: redTeam.rebuttal,
+              };
+            } else {
+              redTeamRefuta++;
+              console.log(`      🚫 Predicción REFUTADA para "${thread.title}" — no se registra.`);
+              predictionToRegister = null;
+            }
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(`      ⚠️ Contra-debate falló ("${msg}") — registrando predicción sin red-team.`);
+          predictionToRegister = {
+            statement: analysis.predictionStatement,
+            condition: analysis.predictionCondition ?? null,
+            falsification: analysis.predictionFalsification ?? null,
+            reviewDate: analysis.predictionReviewDate ?? null,
+            confidence: "media",
+            rebuttal: "",
+          };
+        }
+      }
+
+      if (insertedAnalysis && predictionToRegister) {
+        const { registerPredictionFromAnalysis } = await import("./predictions");
+        registerPredictionFromAnalysis({
+          analysisId: insertedAnalysis.id,
+          threadId: thread.id,
+          statement: predictionToRegister.statement,
+          condition: predictionToRegister.condition,
+          falsification: predictionToRegister.falsification,
+          reviewDate: predictionToRegister.reviewDate,
+          createdAt: now,
+          confidence: predictionToRegister.confidence,
+          rebuttal: predictionToRegister.rebuttal || null,
+        });
+      }
 
       /*
        * Actualizar el state del hilo (la memoria acumulada), las entidades
@@ -459,11 +618,19 @@ export async function analyzeAllThreads(opts?: {
     skipped: totalSkipped,
     failed,
     totalTimeMs,
+    redTeam: { sostiene: redTeamSostiene, debilita: redTeamDebilita, refuta: redTeamRefuta },
+    redTeamFilter: { evaluated: redTeamEvaluated, skipped: redTeamSkipped },
   };
 
   console.log(
-    `\n🏁 ANÁLISIS COMPLETADO — ${summary.analyzed} hilos analizados, ${summary.skipped} saltados, ${summary.failed} fallidos — ${(totalTimeMs / 1000).toFixed(1)}s total\n`
+    `\n🏁 ANÁLISIS COMPLETADO — ${summary.analyzed} hilos analizados, ${summary.skipped} saltados, ${summary.failed} fallidos — ${(totalTimeMs / 1000).toFixed(1)}s total`
   );
+  if (redTeamEvaluated + redTeamSkipped > 0) {
+    console.log(
+      `⚖️  CONTRA-DEBATE — ${redTeamEvaluated} evaluados (${redTeamSkipBySource} por fuente única, ${redTeamSkipByPerspectives} por <3 perspectivas, ${redTeamSkipByInertia} contra inercia), ${redTeamSkipped} saltados (corroborados) — ${redTeamSostiene} sostienen, ${redTeamDebilita} debilitan, ${redTeamRefuta} refutan`
+    );
+  }
+  console.log();
 
   return summary;
 }

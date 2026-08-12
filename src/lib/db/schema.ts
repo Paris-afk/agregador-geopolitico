@@ -202,6 +202,15 @@ export const analyses = sqliteTable("analyses", {
   saidVsDone: text("said_vs_done").notNull(),
   deviation: text("deviation"),
   prediction: text("prediction"),
+  predictionStatement: text("prediction_statement"),
+  predictionCondition: text("prediction_condition"),
+  predictionFalsification: text("prediction_falsification"),
+  predictionReviewDate: text("prediction_review_date"),
+  rebuttal: text("rebuttal"),
+  alternativeHypothesis: text("alternative_hypothesis"),
+  rebuttalVerdict: text("rebuttal_verdict", {
+    enum: ["sostiene", "debilita", "refuta"],
+  }),
   verdict: text("verdict").notNull(),
   analysisDate: text("analysis_date").notNull(),
   createdAt: text("created_at").notNull(),
@@ -290,6 +299,40 @@ export const metaAnalyses = sqliteTable("meta_analyses", {
   threadIds: text("thread_ids").notNull(),
   createdAt: text("created_at").notNull(),
   read: integer("read", { mode: "boolean" }).notNull().default(false),
+});
+
+/*
+ * predictions — Registro de predicciones falsables, para cerrar el ciclo de
+ * validación y medir el track record del analista.
+ *
+ * Las predicciones son BINARIAS por diseño (sin status "partial"): al llegar
+ * la fecha de revisión se evalúan como confirmadas o falsadas. Solo cuando la
+ * evidencia no permite saber si ocurrió se marcan "unverifiable".
+ *
+ *   - sourceType: thread (viene de un análisis de teatro) | meta (sistémica).
+ *   - sourceId: id del análisis o meta_análisis de origen.
+ *   - status: pending | confirmed | falsified | unverifiable.
+ */
+export const predictions = sqliteTable("predictions", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sourceType: text("source_type", { enum: ["thread", "meta"] }).notNull(),
+  sourceId: integer("source_id").notNull(),
+  threadId: integer("thread_id").references(() => threads.id),
+  statement: text("statement").notNull(),
+  condition: text("condition"),
+  falsificationCondition: text("falsification_condition"),
+  reviewDate: text("review_date"),
+  status: text("status", {
+    enum: ["pending", "confirmed", "falsified", "unverifiable"],
+  })
+    .notNull()
+    .default("pending"),
+  confidence: text("confidence", { enum: ["alta", "media", "baja"] }),
+  rebuttal: text("rebuttal"),
+  resolution: text("resolution"),
+  resolvedAt: text("resolved_at"),
+  evidenceArticleIds: text("evidence_article_ids"),
+  createdAt: text("created_at").notNull(),
 });
 
 /*

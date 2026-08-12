@@ -17,7 +17,8 @@
     "job:weekly": "tsx src/jobs/weekly.ts",
     "script:clean-images": "tsx src/scripts/clean-images.ts",
     "script:backfill-entities": "tsx src/scripts/backfill-entities.ts",
-    "script:prune-threads": "tsx src/scripts/prune-threads.ts"
+    "script:prune-threads": "tsx src/scripts/prune-threads.ts",
+    "script:backfill-predictions": "tsx src/scripts/backfill-predictions.ts"
   },
   "dependencies": {
     "@extractus/article-extractor": "^9.0.0",

@@ -188,6 +188,11 @@ export type AnalysisOutput = {
   saidVsDone: string;
   deviation: string;
   prediction: string;
+  predictionStatement?: string;
+  predictionCondition?: string;
+  predictionFalsification?: string;
+  predictionReviewDate?: string | null;
+  againstInertia?: boolean;
   verdict: string;
   newState: string;
   countries: string[];
@@ -352,6 +357,11 @@ export async function analyzeThread(
     saidVsDone: obj.saidVsDone as string,
     deviation: obj.deviation as string,
     prediction: obj.prediction as string,
+    predictionStatement: typeof obj.predictionStatement === "string" ? obj.predictionStatement : undefined,
+    predictionCondition: typeof obj.predictionCondition === "string" ? obj.predictionCondition : undefined,
+    predictionFalsification: typeof obj.predictionFalsification === "string" ? obj.predictionFalsification : undefined,
+    predictionReviewDate: typeof obj.predictionReviewDate === "string" ? obj.predictionReviewDate : null,
+    againstInertia: obj.againstInertia === true,
     verdict: obj.verdict as string,
     newState: obj.newState as string,
     countries: toCleanStringArray(obj.countries),
@@ -648,6 +658,16 @@ Propón el título del teatro fusionado.`;
  * El padre puede cambiarlo a MODEL_SMART si quiere razonamiento más profundo.
  */
 
+export type ConnectedThread = {
+  id: number;
+  title: string;
+  state: string | null;
+  verdict: string | null;
+  linkType: string;
+  rationale: string;
+  strength: number;
+};
+
 export type AskThreadInput = {
   threadTitle: string;
   threadState: string | null;
@@ -660,6 +680,7 @@ export type AskThreadInput = {
     verdict: string;
   } | null;
   articles: Array<{ title: string; sourceName: string; bias: string }>;
+  connectedThreads?: ConnectedThread[];
   question: string;
   history: Array<{ role: "user" | "assistant"; content: string }>;
 };
@@ -680,6 +701,7 @@ export async function askThread(input: AskThreadInput): Promise<AskThreadOutput>
     threadState: input.threadState,
     analysis: input.analysis,
     articles: input.articles,
+    connectedThreads: input.connectedThreads ?? [],
   });
 
   /*
@@ -822,12 +844,46 @@ const META_REQUIRED_KEYS: (keyof MetaAnalysisResult)[] = [
  * isValidReviewDate — Valida que la fecha de revisión sea FUTURA respecto a
  * hoy, entre 30 y 180 días.
  */
-function isValidReviewDate(reviewDate: string | undefined, today: Date): boolean {
+export function isValidReviewDate(reviewDate: string | undefined, today: Date): boolean {
   if (!reviewDate) return false;
   const d = new Date(reviewDate);
   if (isNaN(d.getTime())) return false;
   const days = Math.floor((d.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
   return days >= 30 && days <= 180;
+}
+
+/*
+ * extractDeadlineFromStatement — Busca fechas explícitas (YYYY-MM-DD) en el
+ * enunciado de la predicción. La fecha de revisión NUNCA puede ser anterior a
+ * la fecha límite mencionada en el statement (ej: statement dice "antes del
+ * 31 de diciembre de 2026", reviewDate no puede ser 15 de diciembre).
+ * Devuelve null si no hay ninguna fecha explícita en el statement.
+ */
+export function extractDeadlineFromStatement(statement: string): string | null {
+  const matches = statement.match(/\b(\d{4})-(\d{2})-(\d{2})\b/g);
+  if (!matches) return null;
+  // la fecha más tardía mencionada es la que actúa como límite
+  return matches.sort().at(-1) ?? null;
+}
+
+/*
+ * isValidReviewDateForStatement — Valida reviewDate contra hoy (futuro, 30-180
+ * días) Y contra cualquier fecha límite mencionada en el statement (nunca
+ * anterior a ella).
+ */
+export function isValidReviewDateForStatement(
+  reviewDate: string | undefined,
+  today: Date,
+  statement: string
+): boolean {
+  if (!isValidReviewDate(reviewDate, today)) return false;
+  const deadline = extractDeadlineFromStatement(statement);
+  if (deadline) {
+    const d = new Date(reviewDate!);
+    const dl = new Date(deadline);
+    if (d.getTime() < dl.getTime()) return false;
+  }
+  return true;
 }
 
 /*
@@ -892,12 +948,13 @@ export async function runMetaAnalysisLLM(input: RunMetaInput): Promise<MetaAnaly
   let obj = await callMeta(input, false);
 
   let reviewDate: string | null = typeof obj.predictionReviewDate === "string" ? obj.predictionReviewDate : null;
-  if (!isValidReviewDate(reviewDate ?? undefined, today)) {
+  const statement = typeof obj.predictionStatement === "string" ? obj.predictionStatement : "";
+  if (!isValidReviewDateForStatement(reviewDate ?? undefined, today, statement)) {
     console.log("   [meta] ⚠️ predictionReviewDate inválida (" + (reviewDate ?? "ausente") + ") — reintentando...");
     obj = await callMeta(input, true);
     reviewDate = typeof obj.predictionReviewDate === "string" ? obj.predictionReviewDate : null;
 
-    if (!isValidReviewDate(reviewDate ?? undefined, today)) {
+    if (!isValidReviewDateForStatement(reviewDate ?? undefined, today, statement)) {
       console.log("   [meta] ⚠️ El reintento SIGUE con fecha inválida (" + (reviewDate ?? "ausente") + "). Guardando con reviewDate null.");
       reviewDate = null;
     }

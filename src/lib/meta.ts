@@ -158,6 +158,63 @@ export async function runMetaAnalysis(): Promise<{
     console.log("   ⚠️ predictionReviewDate null — la predicción no tiene fecha de revisión válida (no verificable).");
   }
 
+  /*
+   * Registrar la predicción sistémica en `predictions`.
+   * En el META-ANÁLISIS el red-team se ejecuta SIEMPRE (sin filtro condicional):
+   * las predicciones sistémicas son de alto impacto y merecen refutación.
+   */
+  try {
+    const { runRedTeam } = await import("./redteam");
+    const { registerPredictionFromMeta } = await import("./predictions");
+
+    let confidence: "alta" | "media" | "baja" = "media";
+    let rebuttal: string | null = null;
+    let statementToRegister = result.predictionStatement;
+
+    try {
+      const redTeam = await runRedTeam({
+        statement: result.predictionStatement,
+        reasoning: `${result.systemReading}\n\nVeredicto: ${result.verdict}`,
+        verification: "Predicción sistémica sobre el conjunto de teatros — verificación global (siempre sometida a refutación).",
+        context: `Período: ${cutoff} a ${now}\nTeatros del meta-análisis: ${ids.join(", ")}`,
+      });
+
+      if (redTeam.verdict === "sostiene") {
+        confidence = "alta";
+        rebuttal = redTeam.rebuttal;
+      } else if (redTeam.verdict === "debilita") {
+        confidence = "media";
+        rebuttal = redTeam.rebuttal;
+        if (redTeam.suggestedRevision?.trim()) {
+          statementToRegister = redTeam.suggestedRevision.trim();
+        }
+      } else {
+        // refuta: no registramos predicción sistémica
+        console.log("   🚫 Predicción sistémica REFUTADA — no se registra.");
+        statementToRegister = "";
+      }
+      console.log(`   ⚖️ Red-team (meta): ${redTeam.verdict}`);
+    } catch (err) {
+      console.log(`   ⚠️ Red-team (meta) falló: ${err}`);
+    }
+
+    if (statementToRegister) {
+      registerPredictionFromMeta({
+        metaId: inserted.id,
+        threadIds: ids,
+        statement: statementToRegister,
+        condition: result.predictionCondition,
+        falsification: result.predictionFalsification,
+        reviewDate: result.predictionReviewDate,
+        createdAt: now,
+        confidence,
+        rebuttal,
+      });
+    }
+  } catch (err) {
+    console.error("   ⚠️ No se pudo registrar la predicción sistémica:", err);
+  }
+
   console.log(`\n✅ META-ANÁLISIS COMPLETADO — id ${inserted.id}`);
   console.log(`   Veredicto: ${result.verdict.slice(0, 120)}`);
 

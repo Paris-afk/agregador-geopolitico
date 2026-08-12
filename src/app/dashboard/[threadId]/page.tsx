@@ -106,6 +106,10 @@ type ThreadData = {
     saidVsDone: string;
     deviation: string | null;
     prediction: string | null;
+    predictionStatement: string | null;
+    rebuttal: string | null;
+    alternativeHypothesis: string | null;
+    rebuttalVerdict: string | null;
     verdict: string;
     analysisDate: string;
     createdAt: string;
@@ -334,6 +338,29 @@ export default function ThreadDetailPage() {
               </div>
             )}
 
+            {/* REFUTACIÓN — el analista escéptico habla, no el principal */}
+            {a.rebuttal && (
+              <div style={{ marginTop: 44 }}>
+                <div className="flex items-center gap-[14px] mb-3">
+                  <span className={ibmPlexMono.className} style={{ fontSize: 11, letterSpacing: ".24em", textTransform: "uppercase", color: "var(--alarm)", fontWeight: 600 }}>Refutación</span>
+                  <span className={ibmPlexMono.className} style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--faint)" }}>
+                    {a.rebuttalVerdict === "sostiene" ? "El escéptico sostiene la predicción" : a.rebuttalVerdict === "debilita" ? "La predicción se debilitó" : "La predicción fue refutada"}
+                  </span>
+                  <span style={{ flex: 1, height: 1, background: "var(--line)" }}></span>
+                </div>
+                <div style={{ border: "1px solid var(--alarm)", borderLeft: "3px solid var(--alarm)", background: "var(--alarm-soft)", padding: "20px 24px" }}>
+                  <div className={ibmPlexMono.className} style={{ fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--alarm)", fontWeight: 600, marginBottom: 8 }}>El analista escéptico</div>
+                  <p style={{ margin: 0, fontSize: 15, lineHeight: 1.6, color: "var(--fg)" }}>{a.rebuttal}</p>
+                  {a.alternativeHypothesis && (
+                    <>
+                      <div className={ibmPlexMono.className} style={{ fontSize: 9.5, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--alarm)", fontWeight: 600, marginTop: 16, marginBottom: 8 }}>Hipótesis alternativa</div>
+                      <p style={{ margin: 0, fontSize: 14.5, lineHeight: 1.6, color: "var(--fg)", fontStyle: "italic" }}>{a.alternativeHypothesis}</p>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Fuentes — artículos que sustentan el análisis */}
             <div style={{ marginTop: 56 }}>
               <div className="flex items-center gap-[14px] mb-[18px]">
@@ -423,6 +450,7 @@ function ChatSection({ threadId, threadTitle }: { threadId: number; threadTitle:
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   /*
    * Enviar pregunta: POST /api/threads/[threadId]/ask
@@ -439,6 +467,7 @@ function ChatSection({ threadId, threadTitle }: { threadId: number; threadTitle:
     setMessages(updated);
     setInput("");
     setLoading(true);
+    setError(null);
 
     try {
       const res = await fetch(`/api/threads/${threadId}/ask`, {
@@ -456,6 +485,7 @@ function ChatSection({ threadId, threadTitle }: { threadId: number; threadTitle:
         setMessages([...updated, { role: "assistant", content: `⚠️ ${data.error ?? "Error desconocido"}` }]);
       }
     } catch {
+      setError("No se pudo contactar al analista. Comprueba la conexión y reintenta.");
       setMessages([...updated, { role: "assistant", content: "⚠️ No se pudo contactar al analista." }]);
     } finally {
       setLoading(false);
@@ -466,7 +496,7 @@ function ChatSection({ threadId, threadTitle }: { threadId: number; threadTitle:
     <section style={{ marginTop: 56 }}>
       <div className="flex items-center gap-[14px] mb-4">
         <span className={ibmPlexMono.className} style={{ fontSize: 11, letterSpacing: ".24em", textTransform: "uppercase", color: "var(--fg-strong)", fontWeight: 600 }}>Preguntar al analista</span>
-        <span className={ibmPlexMono.className} style={{ fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--faint)" }}>Contexto del teatro cargado</span>
+        <span className={ibmPlexMono.className} style={{ fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--faint)" }}>Contexto del teatro y sus conexiones</span>
         <span style={{ flex: 1, height: 1, background: "var(--line)" }}></span>
       </div>
 
@@ -490,24 +520,56 @@ function ChatSection({ threadId, threadTitle }: { threadId: number; threadTitle:
         </div>
       )}
 
-      {/* Input + botón */}
-      <form onSubmit={sendQuestion} className="flex gap-3 items-center">
-        <input
-          type="text"
+      {/* Indicador de carga */}
+      {loading && (
+        <div className="flex items-center gap-3" style={{ marginBottom: 14 }}>
+          <div className="flex gap-1.5">
+            <span className="animate-pulse" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alarm)" }}></span>
+            <span className="animate-pulse" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alarm)", animationDelay: ".15s" }}></span>
+            <span className="animate-pulse" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--alarm)", animationDelay: ".3s" }}></span>
+          </div>
+          <span className={ibmPlexMono.className} style={{ fontSize: 10, letterSpacing: ".16em", textTransform: "uppercase", color: "var(--muted)" }}>
+            El analista está razonando...
+          </span>
+        </div>
+      )}
+
+      {/* Error legible */}
+      {error && (
+        <div className={ibmPlexMono.className} style={{
+          marginBottom: 12, padding: "10px 14px", fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase",
+          color: "var(--alarm)", background: "var(--alarm-soft)", borderLeft: "2px solid var(--alarm)", borderRadius: 2,
+        }}>
+          {error}
+        </div>
+      )}
+
+      {/* Input + botón (textarea grande para chat) */}
+      <form onSubmit={sendQuestion} className="flex gap-3 items-end">
+        <textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter envía, Shift+Enter hace salto de línea
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              sendQuestion(e);
+            }
+          }}
           placeholder={loading ? "El analista está pensando..." : `Pregunta sobre "${threadTitle}"...`}
           disabled={loading}
-          className="flex-1 min-w-0 px-4 py-2.5 text-[15px] rounded-sm focus:outline-none"
+          rows={3}
+          className="flex-1 min-w-0 px-4 py-3 text-[15px] rounded-sm focus:outline-none resize-y"
           style={{
             background: "var(--surface-2)", border: "1px solid var(--line-strong)",
             color: "var(--fg)", fontFamily: `${playfair.style.fontFamily}, Georgia, serif`,
+            lineHeight: 1.5, opacity: loading ? 0.5 : 1,
           }}
         />
         <button
           type="submit"
           disabled={loading || !input.trim()}
-          className={`${ibmPlexMono.className} px-4 py-2.5 rounded-sm flex-none transition-opacity`}
+          className={`${ibmPlexMono.className} px-5 py-3 rounded-sm flex-none transition-opacity`}
           style={{
             fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", cursor: loading ? "default" : "pointer",
             border: "1px solid var(--line-strong)", background: "var(--line-strong)", color: "var(--fg-strong)",
@@ -519,7 +581,7 @@ function ChatSection({ threadId, threadTitle }: { threadId: number; threadTitle:
       </form>
 
       <p className={ibmPlexMono.className} style={{ marginTop: 10, fontSize: 9, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--faint)" }}>
-        La conversación es por sesión — se pierde al recargar la página.
+        Enter envía · Shift+Enter para salto de línea · La conversación es por sesión
       </p>
     </section>
   );

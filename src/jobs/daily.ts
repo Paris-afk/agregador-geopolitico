@@ -158,6 +158,22 @@ async function main() {
   }
 
   /*
+   * FASE 3b: EVALUACIÓN DE PREDICCIONES VENCIDAS
+   */
+  console.log("\n🎯 FASE 3b — EVALUACIÓN DE PREDICCIONES VENCIDAS\n");
+  const t3b = Date.now();
+
+  try {
+    const { evaluateDuePredictions } = await import("../lib/predictions");
+    const result = await evaluateDuePredictions();
+    console.log(`\n✅ PREDICCIONES EVALUADAS — ${result.evaluated} en ${((Date.now() - t3b) / 1000).toFixed(1)}s`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`\n❌ EVALUACIÓN DE PREDICCIONES FALLÓ: ${msg}`);
+    console.error("Puede ejecutarse manualmente: POST /api/predictions/evaluate");
+  }
+
+  /*
    * RESUMEN FINAL
    */
   const totalTime = ((Date.now() - pipelineStarted) / 1000).toFixed(1);

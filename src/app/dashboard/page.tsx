@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { IBM_Plex_Mono, Playfair_Display } from "next/font/google";
 import { BIAS_LABELS, type BiasValue } from "@/lib/sources-types";
 
@@ -153,6 +154,7 @@ export default function DashboardPage() {
   const [activeSource, setActiveSource] = useState<BiasValue | null>(null);
   const [themePref, setThemePref] = useState<ThemeMode>("auto");
   const [systemDark, setSystemDark] = useState(false);
+  const [overduePredictions, setOverduePredictions] = useState(0);
 
   useEffect(() => {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -160,6 +162,17 @@ export default function DashboardPage() {
     const handler = (e: MediaQueryListEvent) => setSystemDark(e.matches);
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
+  }, []);
+
+  // Aviso discreto de predicciones vencidas sin evaluar
+  useEffect(() => {
+    fetch("/api/predictions")
+      .then((r) => r.json())
+      .then((j) => {
+        const dueToday = j?.pending?.filter((p: { reviewDate: string }) => p.reviewDate && p.reviewDate <= j.todayISO)?.length ?? 0;
+        setOverduePredictions(dueToday);
+      })
+      .catch(() => {});
   }, []);
 
   const effectiveTheme: "light" | "dark" = themePref === "auto" ? (systemDark ? "dark" : "light") : themePref;
@@ -339,6 +352,15 @@ export default function DashboardPage() {
 
         {/* Contenido principal */}
         <main className="max-w-[1220px] mx-auto px-4 md:px-[44px] pb-[90px]">
+          {overduePredictions > 0 && (
+            <div className={`${ibmPlexMono.className} flex items-center justify-between gap-3 flex-wrap`} style={{
+              padding: "10px 16px", marginBottom: 18, fontSize: 10, letterSpacing: ".12em", textTransform: "uppercase",
+              color: "var(--alarm)", background: "var(--alarm-soft)", borderLeft: "2px solid var(--alarm)", borderRadius: 2,
+            }}>
+              <span>⚠ {overduePredictions} predicción{overduePredictions > 1 ? "es" : ""} vencida{overduePredictions > 1 ? "s" : ""} sin evaluar</span>
+              <Link href="/predicciones" style={{ color: "var(--alarm)", fontWeight: 600 }}>Evaluar →</Link>
+            </div>
+          )}
           {!empty && lead ? (
             <LeadCard row={lead} onNavigate={() => router.push(`/dashboard/${lead.thread.id}`)} onToggleRead={() => toggleRead(lead.latestAnalysis.id)} />
           ) : (
@@ -384,7 +406,11 @@ export default function DashboardPage() {
           <footer className={`${ibmPlexMono.className} flex justify-between items-center flex-wrap gap-[10px]`} style={{
             marginTop: 40, paddingTop: 16, borderTop: "1px solid var(--line)", fontSize: 10, letterSpacing: ".14em", textTransform: "uppercase", color: "var(--faint)",
           }}>
-            <span>Fin del briefing</span>
+            <span className="flex items-center gap-4">
+              <span>Fin del briefing</span>
+              <Link href="/predicciones" style={{ color: "var(--muted)" }}>Predicciones →</Link>
+              <Link href="/meta" style={{ color: "var(--muted)" }}>Editorial →</Link>
+            </span>
             <span>Fuente única · no redistribuir</span>
           </footer>
         </main>

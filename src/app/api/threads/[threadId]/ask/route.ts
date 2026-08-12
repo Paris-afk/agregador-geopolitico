@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db/index";
-import { threads, analyses, articles, articleThreads, sources } from "@/lib/db/schema";
-import { eq, desc } from "drizzle-orm";
+import { threads, analyses, articles, articleThreads, sources, threadLinks } from "@/lib/db/schema";
+import { eq, desc, or, sql } from "drizzle-orm";
 import { askThread } from "@/lib/deepseek";
+import type { ConnectedThread } from "@/lib/deepseek";
 
 /*
  * POST /api/threads/[threadId]/ask
@@ -70,6 +71,56 @@ export async function POST(
       .limit(10)
       .all();
 
+    /*
+     * TEATROS CONECTADOS vía thread_links.
+     * Toma los links que involucran a este teatro, ordenados por strength
+     * desc, y resuelve el otro extremo de cada uno. Máximo 5.
+     */
+    const links = db
+      .select({
+        threadA: threadLinks.threadA,
+        threadB: threadLinks.threadB,
+        linkType: threadLinks.linkType,
+        rationale: threadLinks.rationale,
+        strength: threadLinks.strength,
+      })
+      .from(threadLinks)
+      .where(
+        sql`${threadLinks.threadA} = ${id} OR ${threadLinks.threadB} = ${id}`
+      )
+      .all()
+      .sort((a, b) => b.strength - a.strength)
+      .slice(0, 5);
+
+    const connectedThreads: ConnectedThread[] = [];
+    for (const link of links) {
+      const otherId = link.threadA === id ? link.threadB : link.threadA;
+      const other = db.select().from(threads).where(eq(threads.id, otherId)).get();
+      if (!other) continue;
+
+      const otherLatest = db
+        .select({ verdict: analyses.verdict, analysisDate: analyses.analysisDate })
+        .from(analyses)
+        .where(eq(analyses.threadId, otherId))
+        .orderBy(desc(analyses.analysisDate))
+        .limit(1)
+        .get();
+
+      connectedThreads.push({
+        id: other.id,
+        title: other.title,
+        state: other.state ?? null,
+        verdict: otherLatest?.verdict ?? null,
+        linkType: link.linkType,
+        rationale: link.rationale,
+        strength: link.strength,
+      });
+    }
+
+    console.log(
+      `   [chat] teatro ${id}: ${connectedThreads.length} teatros conectados incluidos en el contexto (${connectedThreads.map((c) => c.id).join(",") || "ninguno"})`
+    );
+
     const result = await askThread({
       threadTitle: thread.title,
       threadState: thread.state ?? null,
@@ -84,6 +135,7 @@ export async function POST(
           }
         : null,
       articles: recentArticles,
+      connectedThreads,
       question,
       history,
     });
