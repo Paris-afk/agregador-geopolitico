@@ -106,7 +106,7 @@ export async function extractEntities(input: {
   const system = `Eres un extractor de entidades geopolíticas. Recibes información sobre UN teatro estratégico y debes extraer sus entidades.
 
 Extrae SOLO de la información dada:
-- countries: array de códigos ISO 3166-1 alpha-2 (ej: "GR", "TR", "CY") de países que son ACTORES o ESCENARIO del teatro. No incluyas mencionados de pasada.
+- countries: array de códigos ISO 3166-1 alpha-2 (ej: "GR", "TR", "CY") de países que son ACTOR PRINCIPAL o ESCENARIO FÍSICO del teatro. Un país mencionado como ejemplo, comparación, destino comercial secundario o contexto NO se incluye. Máximo 6 países: quédate con los 6 más centrales.
 - actors: array de actores NO ESTATALES o supranacionales (OTAN, UE, Hezbolá, Gazprom, milicias, empresas, instituciones).
 - domains: array de 1 a 4 dominios del VOCABULARIO CERRADO de abajo. Elige los que están MATERIALMENTE en juego. SOLO puedes usar estos valores EXACTOS (snake_case), nunca inventes ni uses sinónimos:
 ${domainsVocabularyText()}

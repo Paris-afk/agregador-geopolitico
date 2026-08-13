@@ -1,0 +1,135 @@
+flowchart TD
+    subgraph CRON["⏰ CRON"]
+        D["daily.ts<br/>01:00 diario"]
+        W["weekly.ts<br/>02:00 domingos"]
+    end
+
+    subgraph F1["FASE 1 · INGESTA"]
+        ING["ingestAllSources()<br/>rss.ts"]
+        SRC[("sources<br/>bias por fuente")]
+        ART[("articles<br/>status: pending")]
+    end
+
+    subgraph F1B["FASE 1b · ENRIQUECIMIENTO"]
+        IMG["extractImagesForArticles()<br/>images.ts"]
+        N1{"¿imagen en<br/>el feed?"}
+        N2["resolveRealUrl()<br/>+ og:image"]
+        GARB["isGarbageImage()<br/>filtra logos"]
+    end
+
+    subgraph F2["FASE 2 · CLASIFICACIÓN"]
+        CLS["classifyUnassignedArticles()<br/>classify.ts · Flash · lotes de 30"]
+        MODE{"¿createNewThreads?"}
+        DEF["status: deferred<br/>(espera al semanal)"]
+        THR[("threads + article_threads")]
+    end
+
+    subgraph F3["FASE 3 · ANÁLISIS"]
+        SEL{"¿artículos nuevos<br/>en 24h?"}
+        SKIP["⏭ saltado"]
+        ST{"¿tiene state?"}
+        INC["solo artículos NUEVOS<br/>+ state"]
+        FULL["todos (máx 40)<br/>primer análisis"]
+        EXT["extractTextsForArticles()<br/>2 artículos a texto completo"]
+        AN["analyzeThread()<br/>deepseek.ts"]
+        VAL{"validar:<br/>JSON · idioma · fechas"}
+        RETRY["reintento degradado<br/>sin fullText"]
+        ANA[("analyses<br/>+ state reescrito<br/>+ countries/actors/domains")]
+    end
+
+    subgraph F35["CONTRA-DEBATE"]
+        RKF{"¿predicción<br/>de riesgo?"}
+        SKIPRT["saltado: corroborada<br/>(3+ persp, continuista)<br/>confidence alta"]
+        VER["verifyPredictionFacts()<br/>verify.ts · ¿en cuántas<br/>perspectivas aparece?"]
+        RED["runRedTeam()<br/>redteam.ts · abogado del diablo"]
+        VERD{"veredicto"}
+        PRED[("predictions<br/>status: pending")]
+        NOPRED["sin predicción<br/>(mejor ninguna que mala)"]
+    end
+
+    subgraph F3B["FASE 3b · VALIDACIÓN"]
+        EVAL["evaluateDuePredictions()<br/>predictions.ts"]
+        DUE{"¿reviewDate<br/>vencida?"}
+        RES["confirmed / falsified /<br/>unverifiable"]
+    end
+
+    subgraph NEU["NEURONA · semanal"]
+        SIG["signalBetween()<br/>dominios + entidades IDF<br/>umbral 0.4"]
+        LNK["classifyLink()<br/>links.ts"]
+        TL[("thread_links<br/>upsert: timesConfirmed++")]
+        TOP["top 20 por<br/>perspectivas + tensión + desviación"]
+        META["runMetaAnalysis()<br/>meta.ts"]
+        MA[("meta_analyses")]
+    end
+
+    subgraph MANT["MANTENIMIENTO · semanal"]
+        CONS["consolidateThreads()<br/>umbral 1.0 · grupos ≤3"]
+        PROT{"¿protegido?<br/>≥5 persp · >150 art · tensión 5"}
+        MERGE["mergeThreadStates()<br/>unifica memorias"]
+        PRUNE["pruneThreads()<br/><3 art · 1 persp · 21d sin novedad"]
+    end
+
+    subgraph UI["INTERFAZ"]
+        DASH["/dashboard<br/>score = nuevos×3 + persp×2<br/>+ desviación×10 + no-leído×5"]
+        TEATRO["/dashboard/[id]<br/>+ chat contextual<br/>con teatros conectados"]
+        MET["/meta"]
+        PREDS["/predicciones<br/>+ track record"]
+        TAB["/tablero<br/>mapa · grafo"]
+    end
+
+    D --> ING
+    W --> CLS
+    ING --> SRC
+    SRC --> ART
+    ART --> IMG
+    IMG --> N1
+    N1 -->|sí| GARB
+    N1 -->|no| N2
+    N2 --> GARB
+    GARB --> CLS
+    CLS --> MODE
+    MODE -->|false · diario| DEF
+    MODE -->|true · semanal| THR
+    DEF -.->|espera| W
+    THR --> SEL
+    SEL -->|no| SKIP
+    SEL -->|sí| ST
+    ST -->|sí| INC
+    ST -->|no| FULL
+    INC --> EXT
+    FULL --> EXT
+    EXT --> AN
+    AN --> VAL
+    VAL -->|falla| RETRY
+    RETRY --> AN
+    VAL -->|ok| ANA
+    ANA --> RKF
+    RKF -->|no · corroborada| SKIPRT
+    SKIPRT --> PRED
+    RKF -->|sí · fuente única · <3 persp · contra inercia| VER
+    VER --> RED
+    RED --> VERD
+    VERD -->|sostiene · alta| PRED
+    VERD -->|debilita · media| PRED
+    VERD -->|refuta| NOPRED
+    PRED --> DUE
+    D --> EVAL
+    EVAL --> DUE
+    DUE -->|sí| RES
+    W --> CONS
+    CONS --> PROT
+    PROT -->|no| MERGE
+    PROT -->|sí| CONS
+    MERGE --> PRUNE
+    PRUNE --> SIG
+    SIG --> LNK
+    LNK --> TL
+    TL --> TOP
+    TOP --> META
+    META --> MA
+    ANA --> DASH
+    ANA --> TEATRO
+    MA --> MET
+    RES --> PREDS
+    TL --> TAB
+    ANA --> TAB

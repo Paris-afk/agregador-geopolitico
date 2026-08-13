@@ -274,6 +274,14 @@ export const threadLinks = sqliteTable("thread_links", {
   rationale: text("rationale").notNull(),
   strength: integer("strength").notNull(),
   detectedAt: text("detected_at").notNull(),
+  /*
+   * ESTABILIDAD DEL GRAFO: los links se recalculan cada semana y algunos
+   * pares de peso medio oscilan entre corridas. En lugar de duplicar, si un
+   * par ya existe se ACTUALIZA: timesConfirmed++ y lastSeenAt se refresca.
+   * Un enlace confirmado N semanas seguidas es más fiable que uno de una vez.
+   */
+  timesConfirmed: integer("times_confirmed").notNull().default(1),
+  lastSeenAt: text("last_seen_at").notNull(),
 });
 
 /*

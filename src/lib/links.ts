@@ -155,16 +155,46 @@ export async function detectThreadLinks(opts?: {
     console.log(`      ✓ ${classification.linkType} (${classification.strength}/3) — ${classification.rationale?.slice(0, 90)}`);
 
     if (!dryRun) {
-      db.insert(threadLinks)
-        .values({
-          threadA: a.id,
-          threadB: b.id,
-          linkType: classification.linkType,
-          rationale: classification.rationale ?? "",
-          strength: classification.strength ?? 1,
-          detectedAt: new Date().toISOString(),
-        })
-        .run();
+      const now = new Date().toISOString();
+      /*
+       * UPSERT de estabilidad: si el par ya existe, actualizamos (timesConfirmed++
+       * y lastSeenAt). Si no, lo insertamos con timesConfirmed=1.
+       * Evita duplicados y permite marcar enlaces estables (>=2 confirmaciones).
+       */
+      const existing = db
+        .select()
+        .from(threadLinks)
+        .where(
+          sql`(${threadLinks.threadA} = ${a.id} AND ${threadLinks.threadB} = ${b.id}) OR (${threadLinks.threadA} = ${b.id} AND ${threadLinks.threadB} = ${a.id})`
+        )
+        .get();
+
+      if (existing) {
+        db.update(threadLinks)
+          .set({
+            linkType: classification.linkType,
+            rationale: classification.rationale ?? existing.rationale,
+            strength: classification.strength ?? existing.strength,
+            timesConfirmed: existing.timesConfirmed + 1,
+            lastSeenAt: now,
+            detectedAt: now,
+          })
+          .where(eq(threadLinks.id, existing.id))
+          .run();
+      } else {
+        db.insert(threadLinks)
+          .values({
+            threadA: a.id,
+            threadB: b.id,
+            linkType: classification.linkType,
+            rationale: classification.rationale ?? "",
+            strength: classification.strength ?? 1,
+            detectedAt: now,
+            timesConfirmed: 1,
+            lastSeenAt: now,
+          })
+          .run();
+      }
     }
     confirmed++;
   }

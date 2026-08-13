@@ -135,7 +135,7 @@ Responde ÚNICA Y EXCLUSIVAMENTE con un objeto JSON válido. No incluyas markdow
 }
 
 ENTIDADES DEL TEATRO (4 campos nuevos, OBLIGATORIOS):
-- "countries": array de códigos ISO 3166-1 alpha-2 (ej: "GR", "TR", "CY") de los países que son ACTORES o ESCENARIO del teatro. NO incluyas países mencionados de pasada o que solo contextualizan.
+- "countries": array de códigos ISO 3166-1 alpha-2 (ej: "GR", "TR", "CY") de los países que son ACTORES o ESCENARIO del teatro. Incluye SOLO los países que son ACTOR PRINCIPAL o ESCENARIO FÍSICO del teatro. Un país mencionado como ejemplo, comparación, destino comercial secundario o contexto NO se incluye. Máximo 6 países por teatro: si hay más candidatos, quédate con los 6 más centrales.
 - "actors": array de actores NO ESTATALES o supranacionales relevantes (OTAN, UE, ONU, Hezbolá, Gazprom, milicias, empresas, instituciones). Excluye los estados (esos van en countries).
 - "domains": array de 1 a 4 dominios del VOCABULARIO CERRADO de abajo. Elige los que están MATERIALMENTE en juego. Este campo es CLAVE: conecta teatros por cadena material, no por tema. SOLO puedes usar estos valores EXACTOS (snake_case), nunca inventes ni uses sinónimos:
 ${domainsVocabularyText()}

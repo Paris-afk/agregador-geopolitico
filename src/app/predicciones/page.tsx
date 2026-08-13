@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { IBM_Plex_Mono, Playfair_Display } from "next/font/google";
+import Nav from "@/components/Nav";
 
 /*
  * /predicciones — La hoja de servicio del analista.
@@ -116,12 +117,6 @@ export default function PredictionsPage() {
     load();
   }, []);
 
-  const themeSegs = ([
-    { key: "light" as ThemeMode, label: "Claro" },
-    { key: "dark" as ThemeMode, label: "Oscuro" },
-    { key: "auto" as ThemeMode, label: "Auto" },
-  ]).map((t) => ({ isActive: themePref === t.key, onClick: () => setThemePref(t.key), key: t.key, label: t.label }));
-
   const statusBadge: Record<string, { label: string; cls: string }> = {
     confirmed: { label: "CONFIRMADA", cls: "color: var(--confirm); border-color: var(--confirm); background: var(--confirm-soft)" },
     falsified: { label: "FALSADA", cls: "color: var(--falsify); border-color: var(--falsify); background: var(--falsify-soft)" },
@@ -136,19 +131,12 @@ export default function PredictionsPage() {
 
         {/* Nav */}
         <div className="max-w-[960px] mx-auto pt-[26px] px-4 md:px-8">
-          <div className="flex justify-between items-center gap-4 flex-wrap pb-[18px]" style={{ borderBottom: "1px solid var(--line)" }}>
-            <Link href="/dashboard" className={`${ibmPlexMono.className} inline-flex items-center gap-[9px]`} style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--muted)" }}>
-              <span style={{ fontSize: 14, lineHeight: 1 }}>←</span>Volver al boletín
-            </Link>
-            <div style={{ display: "inline-flex", border: "1px solid var(--line-strong)", borderRadius: 3, overflow: "hidden" }}>
-              {themeSegs.map((seg) => (
-                <button key={seg.key} onClick={seg.onClick} className={ibmPlexMono.className} style={{
-                  fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", border: "none", cursor: "pointer", padding: "5px 12px", fontWeight: 500,
-                  background: seg.isActive ? "var(--line-strong)" : "transparent", color: seg.isActive ? "var(--fg-strong)" : "var(--muted)",
-                }}>{seg.label}</button>
-              ))}
-            </div>
+          <div style={{ paddingTop: 14 }}>
+            <Nav themePref={themePref} onThemeChange={setThemePref} />
           </div>
+          <Link href="/predicciones" className={`${ibmPlexMono.className} inline-flex items-center gap-[9px] mt-[18px]`} style={{ fontSize: 11, letterSpacing: ".12em", textTransform: "uppercase", color: "var(--muted)" }}>
+            <span style={{ fontSize: 14, lineHeight: 1 }}>←</span>Volver a predicciones
+          </Link>
         </div>
 
         <main className="max-w-[960px] mx-auto px-4 md:px-8 pb-[120px]">

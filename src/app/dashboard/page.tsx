@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { IBM_Plex_Mono, Playfair_Display } from "next/font/google";
 import { BIAS_LABELS, type BiasValue } from "@/lib/sources-types";
+import Nav from "@/components/Nav";
 
 /*
  * ============================================================================
@@ -259,12 +260,6 @@ export default function DashboardPage() {
 
   const clearSource = () => setActiveSource(null);
 
-  const themeSegs = ([
-    { key: "light" as ThemeMode, label: "Claro" },
-    { key: "dark" as ThemeMode, label: "Oscuro" },
-    { key: "auto" as ThemeMode, label: "Auto" },
-  ]).map((t) => ({ isActive: themePref === t.key, onClick: () => setThemePref(t.key), key: t.key, label: t.label }));
-
   return (
     <>
       <style>{`
@@ -307,17 +302,12 @@ export default function DashboardPage() {
           </div>
         </header>
 
+        {/* Navegación unificada + selector de temas */}
+        <Nav themePref={themePref} onThemeChange={setThemePref} />
+
         {/* Barra de filtros */}
         <div className="max-w-[1220px] mx-auto pt-4 px-4 md:px-[44px]">
           <div className="flex items-center gap-[14px] flex-wrap pb-[15px]" style={{ borderBottom: "1px solid var(--line)" }}>
-            <div style={{ display: "inline-flex", border: "1px solid var(--line-strong)", borderRadius: 3, overflow: "hidden" }}>
-              {themeSegs.map((seg) => (
-                <button key={seg.key} onClick={seg.onClick} className={ibmPlexMono.className} style={{
-                  fontSize: 9.5, letterSpacing: ".12em", textTransform: "uppercase", border: "none", cursor: "pointer", padding: "5px 12px", fontWeight: 500,
-                  background: seg.isActive ? "var(--line-strong)" : "transparent", color: seg.isActive ? "var(--fg-strong)" : "var(--muted)",
-                }}>{seg.label}</button>
-              ))}
-            </div>
             <span style={{ width: 1, height: 20, background: "var(--line)" }}></span>
             <button onClick={() => setShowUnreadOnly(!showUnreadOnly)} className={ibmPlexMono.className} style={{
               display: "inline-flex", alignItems: "center", gap: 7, fontSize: 9.5, letterSpacing: ".16em",
